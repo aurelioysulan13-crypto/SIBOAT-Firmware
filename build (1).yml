@@ -1,0 +1,56 @@
+name: Build SIBOAT firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get repository files
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core 3.3.5 (same version as ArduinoDroid)
+        shell: bash
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.5
+
+      - name: Arrange sketches and Edge Impulse library
+        shell: bash
+        run: |
+          mkdir -p sketches/SIBOAT_Main sketches/SIBOAT_CAM libs tmp out
+          cp A1a_ESP32_MAIN_FIRMWARE.ino sketches/SIBOAT_Main/SIBOAT_Main.ino
+          cp A1b_ESP32_CAM_FIRMWARE.ino sketches/SIBOAT_CAM/SIBOAT_CAM.ino
+          for z in *.zip; do unzip -q "$z" -d "tmp/$(basename "$z" .zip)"; done
+          find tmp -name library.properties -printf '%h\n' | while read -r d; do cp -r "$d" "libs/$(basename "$d")"; done
+          echo "Libraries found:"; ls libs
+          if ! find libs -name siboat_inferencing.h | grep -q .; then
+            echo "ERROR: siboat_inferencing.h not found. Upload the SIBOAT Edge Impulse Arduino library ZIP to the repository."
+            exit 1
+          fi
+
+      - name: Compile MAIN (ESP32 Dev Module)
+        shell: bash
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32 --libraries libs --warnings none --output-dir out/main sketches/SIBOAT_Main 2>&1 | tee out/main-build.log
+
+      - name: Compile CAM (AI Thinker ESP32-CAM, Huge APP)
+        if: always()
+        shell: bash
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32cam:PartitionScheme=huge_app --libraries libs --warnings none --output-dir out/cam sketches/SIBOAT_CAM 2>&1 | tee out/cam-build.log
+
+      - name: Save compiled files and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIBOAT-firmware
+          path: out/
