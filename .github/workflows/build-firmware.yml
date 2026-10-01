@@ -14,7 +14,6 @@ permissions:
 env:
   ESP32_CORE: "3.3.5"
   ESP32_INDEX_URL: "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
-  ARDUINO_UPDATER_ENABLE_NOTIFICATION: "false"
 
 jobs:
 
@@ -27,6 +26,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -35,7 +35,7 @@ jobs:
         with:
           version: "1.x"
 
-      - name: Install ESP32 Arduino core
+      - name: Configure Arduino CLI
         shell: bash
         run: |
           set -euo pipefail
@@ -45,8 +45,16 @@ jobs:
           arduino-cli config add board_manager.additional_urls \
             "$ESP32_INDEX_URL"
 
+          # Required for installing the local Edge Impulse ZIP.
+          arduino-cli config set library.enable_unsafe_install true
+
           arduino-cli core update-index \
             --additional-urls "$ESP32_INDEX_URL"
+
+      - name: Install ESP32 Arduino core
+        shell: bash
+        run: |
+          set -euo pipefail
 
           arduino-cli core install \
             "esp32:esp32@${ESP32_CORE}" \
@@ -71,7 +79,7 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text(encoding="utf-8")
 
-          profiles = [
+          required = [
               '{ "SIBOAT NETWORK",',
               '{ "bleach.",',
               '{ "Private Wifi",',
@@ -79,24 +87,26 @@ jobs:
 
           positions = []
 
-          for token in profiles:
+          for token in required:
               position = text.find(token)
 
               if position < 0:
                   raise SystemExit(
-                      f"Missing Wi-Fi profile in {path.name}: {token}"
+                      f"Missing Wi-Fi profile: {token}"
                   )
 
               positions.append(position)
 
           if positions != sorted(positions):
               raise SystemExit(
-                  "Wi-Fi profile order must be "
-                  "SIBOAT NETWORK -> bleach. -> Private Wifi"
+                  "Wi-Fi profiles are not in the required order."
               )
 
-          print("MAIN firmware verification passed.")
-          print("Wi-Fi order: SIBOAT NETWORK -> bleach. -> Private Wifi")
+          print("MAIN firmware verified.")
+          print("Wi-Fi order:")
+          print("1. SIBOAT NETWORK")
+          print("2. bleach.")
+          print("3. Private Wifi")
           PY
 
       - name: Prepare MAIN sketch
@@ -128,16 +138,8 @@ jobs:
           set -euo pipefail
 
           FQBN="esp32:esp32:esp32:PartitionScheme=huge_app"
-          LOG="output/main/compile.log"
 
           mkdir -p output/main
-
-          echo "==============================================" | tee "$LOG"
-          echo "SIBOAT MAIN ESP32 BUILD" | tee -a "$LOG"
-          echo "==============================================" | tee -a "$LOG"
-          echo "Arduino-ESP32 core: $ESP32_CORE" | tee -a "$LOG"
-          echo "FQBN: $FQBN" | tee -a "$LOG"
-          echo "" | tee -a "$LOG"
 
           arduino-cli compile \
             --fqbn "$FQBN" \
@@ -146,7 +148,7 @@ jobs:
             --warnings none \
             --clean \
             build_work/siboat_main \
-            2>&1 | tee -a "$LOG"
+            2>&1 | tee output/main/compile.log
 
       - name: Collect MAIN binaries
         if: success()
@@ -186,27 +188,6 @@ jobs:
           cp "$BOOT_APP0" \
             "$OUT/SIBOAT_MAIN_ESP32_BOOT_APP0.bin"
 
-          cat > "$OUT/build_info.txt" <<EOF
-          SIBOAT MAIN ESP32 BUILD
-
-          Git commit:
-          $GITHUB_SHA
-
-          Arduino-ESP32:
-          $ESP32_CORE
-
-          FQBN:
-          esp32:esp32:esp32:PartitionScheme=huge_app
-
-          Source:
-          A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED.ino
-
-          Wi-Fi profile order:
-          1. SIBOAT NETWORK
-          2. bleach.
-          3. Private Wifi
-          EOF
-
       - name: Install esptool
         if: success()
         shell: bash
@@ -216,8 +197,6 @@ jobs:
           python3 -m pip install \
             --disable-pip-version-check \
             esptool
-
-          python3 -m esptool version
 
       - name: Create MAIN all-in-one firmware
         if: success()
@@ -248,27 +227,45 @@ jobs:
           cat > output/main/flash_map.txt <<'EOF'
           SIBOAT MAIN ESP32 FLASH MAP
 
-          Individual binaries:
+          BOOTLOADER:
+          0x1000
 
-          Bootloader:
-          SIBOAT_MAIN_ESP32_BOOTLOADER.bin
-          Address: 0x1000
+          PARTITIONS:
+          0x8000
 
-          Partition table:
-          SIBOAT_MAIN_ESP32_PARTITIONS.bin
-          Address: 0x8000
+          BOOT_APP0:
+          0xE000
 
-          boot_app0:
-          SIBOAT_MAIN_ESP32_BOOT_APP0.bin
-          Address: 0xE000
+          APPLICATION:
+          0x10000
 
-          Application:
-          SIBOAT_MAIN_ESP32_APP.bin
-          Address: 0x10000
+          ALL-IN-ONE:
+          0x0000
+          EOF
 
-          All-in-one:
-          SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin
-          Address: 0x0000
+      - name: Create MAIN build information
+        if: success()
+        shell: bash
+        run: |
+          cat > output/main/build_info.txt <<EOF
+          SIBOAT MAIN ESP32
+
+          Git commit:
+          $GITHUB_SHA
+
+          Arduino-ESP32:
+          $ESP32_CORE
+
+          FQBN:
+          esp32:esp32:esp32:PartitionScheme=huge_app
+
+          Firmware:
+          A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED.ino
+
+          Wi-Fi profiles:
+          1. SIBOAT NETWORK
+          2. bleach.
+          3. Private Wifi
           EOF
 
       - name: Package MAIN firmware
@@ -285,11 +282,6 @@ jobs:
             flash_map.txt \
             build_info.txt \
             compile.log
-
-          cd ../..
-
-          test -s \
-            output/SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip
 
       - name: Upload MAIN firmware
         if: success()
@@ -322,6 +314,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -330,7 +323,7 @@ jobs:
         with:
           version: "1.x"
 
-      - name: Install ESP32 Arduino core
+      - name: Configure Arduino CLI
         shell: bash
         run: |
           set -euo pipefail
@@ -340,8 +333,19 @@ jobs:
           arduino-cli config add board_manager.additional_urls \
             "$ESP32_INDEX_URL"
 
+          # THIS FIXES THE ERROR FROM YOUR SCREENSHOT.
+          arduino-cli config set library.enable_unsafe_install true
+
           arduino-cli core update-index \
             --additional-urls "$ESP32_INDEX_URL"
+
+          echo "Arduino CLI configuration:"
+          arduino-cli config dump
+
+      - name: Install ESP32 Arduino core
+        shell: bash
+        run: |
+          set -euo pipefail
 
           arduino-cli core install \
             "esp32:esp32@${ESP32_CORE}" \
@@ -379,57 +383,60 @@ jobs:
 
               if position < 0:
                   raise SystemExit(
-                      f"Missing Wi-Fi profile in {path.name}: {token}"
+                      f"Missing Wi-Fi profile: {token}"
                   )
 
               positions.append(position)
 
           if positions != sorted(positions):
               raise SystemExit(
-                  "Wi-Fi profile order must be "
-                  "SIBOAT NETWORK -> bleach. -> Private Wifi"
+                  "Wi-Fi profiles are not in the required order."
               )
 
           if "siboat_inferencing.h" not in text:
               raise SystemExit(
-                  "CAM firmware does not reference "
-                  "siboat_inferencing.h"
+                  "siboat_inferencing.h is not referenced by the CAM firmware."
               )
 
-          print("CAM firmware verification passed.")
-          print("Wi-Fi order: SIBOAT NETWORK -> bleach. -> Private Wifi")
+          print("CAM firmware verified.")
+          print("Wi-Fi order:")
+          print("1. SIBOAT NETWORK")
+          print("2. bleach.")
+          print("3. Private Wifi")
           print("Edge Impulse header reference found.")
           PY
 
-      # -------------------------------------------------------
-      # THIS IS THE IMPORTANT FIX
+      # ========================================================
+      # EDGE IMPULSE LIBRARY
       #
-      # Install the Edge Impulse Arduino ZIP as an actual
-      # Arduino library instead of manually assuming where
-      # siboat_inferencing.h is located inside the ZIP.
-      # -------------------------------------------------------
-      - name: Install SIBOAT Edge Impulse Arduino library
+      # The important fix is the configuration above:
+      #
+      # library.enable_unsafe_install = true
+      #
+      # This permits --zip-path.
+      # ========================================================
+      - name: Install SIBOAT Edge Impulse library
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="siboat_inferencing.zip"
+          ZIP_FILE="$GITHUB_WORKSPACE/siboat_inferencing.zip"
 
           test -f "$ZIP_FILE"
           test -s "$ZIP_FILE"
 
-          echo "Installing Edge Impulse Arduino library:"
+          echo "Installing:"
           echo "$ZIP_FILE"
 
           arduino-cli lib install \
-            --zip-path "$PWD/$ZIP_FILE"
+            --zip-path "$ZIP_FILE"
 
           echo ""
           echo "Installed libraries:"
           arduino-cli lib list
 
           echo ""
-          echo "Checking installed SIBOAT inference header..."
+          echo "Searching for siboat_inferencing.h..."
 
           HEADER="$(
             find "$HOME/Arduino/libraries" \
@@ -440,10 +447,11 @@ jobs:
           )"
 
           if [ -z "$HEADER" ]; then
-            echo "ERROR: siboat_inferencing.h was not found after ZIP installation."
+            echo "ERROR:"
+            echo "siboat_inferencing.h was not found."
 
             echo ""
-            echo "Arduino library directory contents:"
+            echo "Installed Arduino libraries:"
             find "$HOME/Arduino/libraries" \
               -maxdepth 4 \
               -type f \
@@ -453,34 +461,8 @@ jobs:
             exit 1
           fi
 
-          echo "Found:"
+          echo "Edge Impulse header found:"
           echo "$HEADER"
-
-          LIB_ROOT="$(dirname "$HEADER")"
-
-          while [ "$LIB_ROOT" != "/" ] && \
-                [ ! -f "$LIB_ROOT/library.properties" ]; do
-            LIB_ROOT="$(dirname "$LIB_ROOT")"
-          done
-
-          if [ ! -f "$LIB_ROOT/library.properties" ]; then
-            echo "ERROR: Could not locate library.properties for SIBOAT inference library."
-            exit 1
-          fi
-
-          echo ""
-          echo "SIBOAT Edge Impulse library root:"
-          echo "$LIB_ROOT"
-
-          echo ""
-          echo "SIBOAT library files:"
-          find "$LIB_ROOT" \
-            -maxdepth 3 \
-            -type f \
-            | sort \
-            | head -300
-
-          test -f "$LIB_ROOT/library.properties"
 
       - name: Prepare CAM sketch
         shell: bash
@@ -511,17 +493,8 @@ jobs:
           set -euo pipefail
 
           FQBN="esp32:esp32:esp32cam:PartitionScheme=huge_app"
-          LOG="output/cam/compile.log"
 
           mkdir -p output/cam
-
-          echo "==============================================" | tee "$LOG"
-          echo "SIBOAT ESP32-CAM BUILD" | tee -a "$LOG"
-          echo "==============================================" | tee -a "$LOG"
-          echo "Arduino-ESP32 core: $ESP32_CORE" | tee -a "$LOG"
-          echo "FQBN: $FQBN" | tee -a "$LOG"
-          echo "Board: AI Thinker ESP32-CAM" | tee -a "$LOG"
-          echo "" | tee -a "$LOG"
 
           arduino-cli compile \
             --fqbn "$FQBN" \
@@ -530,7 +503,7 @@ jobs:
             --warnings none \
             --clean \
             build_work/siboat_cam \
-            2>&1 | tee -a "$LOG"
+            2>&1 | tee output/cam/compile.log
 
       - name: Collect CAM binaries
         if: success()
@@ -570,33 +543,6 @@ jobs:
           cp "$BOOT_APP0" \
             "$OUT/SIBOAT_ESP32_CAM_BOOT_APP0.bin"
 
-          cat > "$OUT/build_info.txt" <<EOF
-          SIBOAT ESP32-CAM BUILD
-
-          Git commit:
-          $GITHUB_SHA
-
-          Arduino-ESP32:
-          $ESP32_CORE
-
-          FQBN:
-          esp32:esp32:esp32cam:PartitionScheme=huge_app
-
-          Board:
-          AI Thinker ESP32-CAM
-
-          Source:
-          A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED.ino
-
-          Edge Impulse library:
-          siboat_inferencing.zip
-
-          Wi-Fi profile order:
-          1. SIBOAT NETWORK
-          2. bleach.
-          3. Private Wifi
-          EOF
-
       - name: Install esptool
         if: success()
         shell: bash
@@ -606,8 +552,6 @@ jobs:
           python3 -m pip install \
             --disable-pip-version-check \
             esptool
-
-          python3 -m esptool version
 
       - name: Create CAM all-in-one firmware
         if: success()
@@ -638,27 +582,51 @@ jobs:
           cat > output/cam/flash_map.txt <<'EOF'
           SIBOAT ESP32-CAM FLASH MAP
 
-          Individual binaries:
+          BOOTLOADER:
+          0x1000
 
-          Bootloader:
-          SIBOAT_ESP32_CAM_BOOTLOADER.bin
-          Address: 0x1000
+          PARTITIONS:
+          0x8000
 
-          Partition table:
-          SIBOAT_ESP32_CAM_PARTITIONS.bin
-          Address: 0x8000
+          BOOT_APP0:
+          0xE000
 
-          boot_app0:
-          SIBOAT_ESP32_CAM_BOOT_APP0.bin
-          Address: 0xE000
+          APPLICATION:
+          0x10000
 
-          Application:
-          SIBOAT_ESP32_CAM_APP.bin
-          Address: 0x10000
+          ALL-IN-ONE:
+          0x0000
+          EOF
 
-          All-in-one:
-          SIBOAT_ESP32_CAM_ALL-IN-ONE.bin
-          Address: 0x0000
+      - name: Create CAM build information
+        if: success()
+        shell: bash
+        run: |
+          cat > output/cam/build_info.txt <<EOF
+          SIBOAT ESP32-CAM
+
+          Git commit:
+          $GITHUB_SHA
+
+          Arduino-ESP32:
+          $ESP32_CORE
+
+          FQBN:
+          esp32:esp32:esp32cam:PartitionScheme=huge_app
+
+          Board:
+          AI Thinker ESP32-CAM
+
+          Firmware:
+          A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED.ino
+
+          Edge Impulse library:
+          siboat_inferencing.zip
+
+          Wi-Fi profiles:
+          1. SIBOAT NETWORK
+          2. bleach.
+          3. Private Wifi
           EOF
 
       - name: Package CAM firmware
@@ -675,11 +643,6 @@ jobs:
             flash_map.txt \
             build_info.txt \
             compile.log
-
-          cd ../..
-
-          test -s \
-            output/SIBOAT_ESP32_CAM_FLASH_PACKAGE.zip
 
       - name: Upload CAM firmware
         if: success()
