@@ -1,15 +1,15 @@
 # =============================================================================
-# SIBOAT firmware builder - Main ESP32 + ESP32-CAM, ONE repo, ONE workflow
+#  SIBOAT firmware builder  -  Main ESP32 + ESP32-CAM, ONE repo, ONE workflow
 #
-# Save this file in your repository as: .github/workflows/build-firmware.yml
+#  Save this file in your repository as:   .github/workflows/build-firmware.yml
 #
-# Two jobs run side by side (one per firmware). Each job:
-# 1. finds its .ino file ANYWHERE in the repo (A1a_... or A1b_...)
-# 2. installs the Arduino-ESP32 core (+ your Edge Impulse ZIP for the camera)
-# 3. compiles, then uploads a downloadable ZIP ("artifact") for that board
+#  Two jobs run side by side (one per firmware). Each job:
+#    1. finds its .ino file ANYWHERE in the repo (A1a_... or A1b_...)
+#    2. installs the Arduino-ESP32 core (+ your Edge Impulse ZIP for the camera)
+#    3. compiles, then uploads a downloadable ZIP ("artifact") for that board
 #
-# Run it: upload/commit any file (automatic), or Actions tab ->
-# "Build SIBOAT firmware" -> Run workflow (manual).
+#  Run it: upload/commit any file (automatic), or Actions tab ->
+#          "Build SIBOAT firmware" -> Run workflow (manual).
 # =============================================================================
 name: Build SIBOAT firmware
 
@@ -93,7 +93,7 @@ jobs:
           SKETCH_GLOB: ${{ matrix.sketch_glob }}
           SKETCH_DIR: ${{ matrix.sketch_dir }}
         run: |
-          # Arduino needs folder-name == .ino-name, so we copy your file into a
+          # Arduino needs  folder-name == .ino-name, so we copy your file into a
           # fresh folder. This also works with names like ..._FIRMWARE__1_.ino
           mapfile -t MATCHES < <(find . -type f -name "$SKETCH_GLOB" -not -path './.git/*' | sort)
           if [ "${#MATCHES[@]}" -eq 0 ]; then
@@ -104,7 +104,7 @@ jobs:
           fi
           if [ "${#MATCHES[@]}" -gt 1 ]; then
             echo "::warning::More than one file matches $SKETCH_GLOB - using the first one."
-            printf ' %s\n' "${MATCHES[@]}"
+            printf '  %s\n' "${MATCHES[@]}"
           fi
           echo "Using sketch: ${MATCHES[0]}"
           mkdir -p "_build/$SKETCH_DIR"
@@ -113,23 +113,57 @@ jobs:
       - name: Install the Edge Impulse library ZIP (camera only)
         if: matrix.needs_edge_impulse == 'true'
         env:
-          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL: 'true'
+          SKETCH_DIR: ${{ matrix.sketch_dir }}
         run: |
-          arduino-cli config set library.enable_unsafe_install true || true
+          # We unzip the library ourselves (instead of "arduino-cli lib install")
+          # and hand the folder to the compiler with --library. That way the
+          # compiler is guaranteed to see siboat_inferencing.h AND the
+          # edge-impulse-sdk/ folder next to it.
+          LIBROOT="$RUNNER_TEMP/siboat-libs"
+          rm -rf "$LIBROOT"
+          mkdir -p "$LIBROOT"
           FOUND=0
           while IFS= read -r ZIP; do
             NAMES="$(unzip -Z1 "$ZIP" 2>/dev/null || true)"
             if grep -qi '_inferencing\.h' <<< "$NAMES"; then
-              echo "Installing Edge Impulse library: $ZIP"
-              arduino-cli lib install --zip-path "$ZIP"
+              echo "Using Edge Impulse library ZIP: $ZIP"
+              unzip -q -o "$ZIP" -d "$LIBROOT"
               FOUND=1
+              break
             fi
-          done < <(find . -type f -iname '*.zip' -not -path './.git/*')
+          done < <(find . -type f -iname '*.zip' -not -path './.git/*' | sort)
           if [ "$FOUND" -ne 1 ]; then
             echo "::error::Edge Impulse Arduino library ZIP not found. Upload the SIBOAT 'Arduino library' ZIP (the one that contains siboat_inferencing.h) anywhere in this repository."
             exit 1
           fi
-          arduino-cli lib list
+
+          mapfile -t PROPS < <(find "$LIBROOT" -type f -name library.properties -not -path '*/examples/*' | sort)
+          if [ "${#PROPS[@]}" -eq 0 ]; then
+            echo "::error::The ZIP has no library.properties file, so it is not a valid Arduino library ZIP."
+            exit 1
+          fi
+          LIBDIR="$(dirname "${PROPS[0]}")"
+          echo "Library folder: $LIBDIR"
+
+          for NEED in src/siboat_inferencing.h src/edge-impulse-sdk/dsp/image/image.hpp; do
+            if [ ! -f "$LIBDIR/$NEED" ]; then
+              echo "::error::Library ZIP is missing $NEED"
+              find "$LIBDIR" -maxdepth 2 | sort | head -40
+              exit 1
+            fi
+          done
+          echo "Library check OK (siboat_inferencing.h and edge-impulse-sdk found)"
+          echo "SIBOAT_LIB_DIR=$LIBDIR" >> "$GITHUB_ENV"
+
+          # The sketch has an optional "library missing" #error guard built on
+          # __has_include. It can confuse arduino-cli's include scan, so we remove
+          # it from the BUILD COPY only (your original .ino is never touched).
+          perl -0pi -e 's/#if defined\(__has_include\)\s*#if !__has_include\(<siboat_inferencing\.h>\)\s*#error[^\n]*\n\s*#endif\s*#endif\n//' "_build/$SKETCH_DIR/$SKETCH_DIR.ino"
+          if grep -q 'siboat_inferencing.h not found' "_build/$SKETCH_DIR/$SKETCH_DIR.ino"; then
+            echo "Note: library guard still present in build copy (harmless)."
+          else
+            echo "Removed the library guard from the build copy."
+          fi
 
       - name: Show the board settings that will be used
         continue-on-error: true
@@ -149,8 +183,13 @@ jobs:
           FQBN: ${{ matrix.fqbn }}
           SKETCH_DIR: ${{ matrix.sketch_dir }}
         run: |
+          LIBARGS=()
+          if [ -n "${SIBOAT_LIB_DIR:-}" ]; then
+            LIBARGS=(--library "$SIBOAT_LIB_DIR")
+          fi
           arduino-cli compile \
             --fqbn "$FQBN" \
+            "${LIBARGS[@]}" \
             --export-binaries \
             --warnings none \
             "_build/$SKETCH_DIR" 2>&1 | tee compile.log
@@ -189,8 +228,8 @@ jobs:
           elif [ -n "$BOOT" ] && [ -n "$PART" ] && [ -f "$BOOTAPP0" ]; then
             echo "The core made no .merged.bin - building the all-in-one file with esptool"
             python3 -m venv /tmp/esptool-venv
-            /tmp/esptool-venv/bin/pip install --quiet esptool
-            /tmp/esptool-venv/bin/python -m esptool --chip esp32 merge_bin -o "$ALLINONE" \
+            /tmp/esptool-venv/bin/pip install --quiet "esptool>=5"
+            /tmp/esptool-venv/bin/python -m esptool --chip esp32 merge-bin -o "$ALLINONE" \
               0x1000 "$BOOT" 0x8000 "$PART" 0xe000 "$BOOTAPP0" 0x10000 "$APP"
           else
             echo "::warning::No all-in-one file could be made - use the files in separate-parts/ (see READ_ME_FIRST.txt)."
@@ -198,7 +237,36 @@ jobs:
 
           BUILT="$(date -u '+%Y-%m-%d %H:%M UTC')"
           SHA="${GITHUB_SHA:0:7}"
-          cat > "$OUT/READ_ME_FIRST.txt" <<EOF SIBOAT firmware build - $LABEL Built: $BUILT Commit: $SHA Core: esp32:esp32@$ESP32_CORE Board: $FQBN WHAT TO FLASH ${LABEL}_ALL-IN-ONE_flash-at-0x0.bin -> write it at address 0x0 (it already contains bootloader + partition table + app) PC with esptool: python -m esptool --chip esp32 --baud 460800 write_flash 0x0 ${LABEL}_ALL-IN-ONE_flash-at-0x0.bin (if it fails, retry with --baud 115200) Browser flasher (Chrome or Edge): https://espressif.github.io/esptool-js/ Connect -> flash address 0x0 -> choose the ALL-IN-ONE file -> Program ESP32-CAM only: if your programmer board does not do it automatically, connect GPIO0 to GND, press RESET, flash, then remove the wire and press RESET. Only if you cannot use the all-in-one file, flash the files in separate-parts/ at: 0x1000 *.bootloader.bin 0x8000 *.partitions.bin 0xe000 boot_app0.bin 0x10000 *.ino.bin EOF
+          # README is written with plain echo lines (no here-document), because
+          # a here-document breaks if its closing EOF line ever loses its indentation.
+          FLASHFILE="${LABEL}_ALL-IN-ONE_flash-at-0x0.bin"
+          {
+            echo "SIBOAT firmware build - $LABEL"
+            echo "Built:   $BUILT"
+            echo "Commit:  $SHA"
+            echo "Core:    esp32:esp32@$ESP32_CORE"
+            echo "Board:   $FQBN"
+            echo ""
+            echo "WHAT TO FLASH"
+            echo "  $FLASHFILE  ->  write it at address 0x0"
+            echo "  (it already contains bootloader + partition table + app)"
+            echo ""
+            echo "PC with esptool:"
+            echo "  python -m esptool --chip esp32 --baud 460800 write_flash 0x0 $FLASHFILE"
+            echo "  (if it fails, retry with --baud 115200)"
+            echo ""
+            echo "Browser flasher (Chrome or Edge):  https://espressif.github.io/esptool-js/"
+            echo "  Connect -> flash address 0x0 -> choose the ALL-IN-ONE file -> Program"
+            echo ""
+            echo "ESP32-CAM only: if your programmer board does not do it automatically,"
+            echo "connect GPIO0 to GND, press RESET, flash, then remove the wire and press RESET."
+            echo ""
+            echo "Only if you cannot use the all-in-one file, flash the files in separate-parts/ at:"
+            echo "  0x1000   *.bootloader.bin"
+            echo "  0x8000   *.partitions.bin"
+            echo "  0xe000   boot_app0.bin"
+            echo "  0x10000  *.ino.bin"
+          } > "$OUT/READ_ME_FIRST.txt"
 
           ls -lh "$OUT" "$OUT/separate-parts"
 
@@ -208,7 +276,7 @@ jobs:
           LABEL: ${{ matrix.label }}
         run: |
           {
-            echo "### $LABEL (esp32 core $ESP32_CORE)"
+            echo "### $LABEL  (esp32 core $ESP32_CORE)"
             echo '```'
             grep -E 'Sketch uses|Global variables use' compile.log 2>/dev/null || echo "(no size info - see the Compile step log)"
             echo '```'
