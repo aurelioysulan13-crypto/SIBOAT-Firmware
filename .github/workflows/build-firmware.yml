@@ -1,33 +1,24 @@
-name: Build SIBOAT Firmware
+name: Build SIBOAT ESP32 Firmware
 
 on:
-  push:
-    branches:
-      - main
-      - master
-
   workflow_dispatch:
+  push:
+    branches: ["main"]
 
 permissions:
   contents: read
 
-env:
-  ESP32_CORE: "3.3.5"
-  ESP32_INDEX_URL: "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
-  ARDUINO_UPDATER_ENABLE_NOTIFICATION: "false"
-
 jobs:
 
-  # ==========================================================
-  # MAIN ESP32
-  # ==========================================================
+  # ============================================================
+  # ESP32 MAIN
+  # ============================================================
   build-main:
-    name: Build MAIN ESP32
+    name: Build ESP32 Main Firmware
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -36,222 +27,111 @@ jobs:
         with:
           version: "1.x"
 
-      - name: Install ESP32 Arduino core
+      - name: Initialize Arduino CLI
         shell: bash
         run: |
           set -euo pipefail
 
           arduino-cli config init
-          arduino-cli config add board_manager.additional_urls "$ESP32_INDEX_URL"
-          arduino-cli core update-index --additional-urls "$ESP32_INDEX_URL"
-          arduino-cli core install "esp32:esp32@${ESP32_CORE}" \
-            --additional-urls "$ESP32_INDEX_URL"
 
-          echo "Installed ESP32 core:"
-          arduino-cli core list | grep '^esp32:esp32' || true
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Verify MAIN source and Wi-Fi profile order
+      - name: Update Arduino indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          arduino-cli core update-index
+
+      - name: Install ESP32 Arduino core 3.3.5
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE="A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
+          arduino-cli core install esp32:esp32@3.3.5
 
-          test -f "$SOURCE"
-
-          python3 - "$SOURCE" <<'PY'
-          from pathlib import Path
-          import sys
-
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8", errors="strict")
-
-          required = [
-              '{ "SIBOAT NETWORK",',
-              '{ "bleach.",',
-              '{ "Private Wifi",',
-          ]
-
-          positions = []
-
-          for token in required:
-              pos = text.find(token)
-
-              if pos < 0:
-                  raise SystemExit(
-                      f"Missing required Wi-Fi profile token in "
-                      f"{path.name}: {token}"
-                  )
-
-              positions.append(pos)
-
-          if positions != sorted(positions):
-              raise SystemExit(
-                  "Wi-Fi profile order is not SSID1 -> SSID2 -> SSID3"
-              )
-
-          print(
-              f"Verified {path.name}: "
-              "SSID1 -> SSID2 -> SSID3"
-          )
-          PY
-
-      - name: Verify MAIN discovery integration
+      - name: Show toolchain information
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE="A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
+          echo "=== Arduino CLI ==="
+          arduino-cli version
 
-          grep -q 'SIBOAT_DISCOVERY_DEVICE_ID' "$SOURCE"
-          grep -q 'seabot_register_device' "$SOURCE"
-          grep -q 'WiFiClientSecure' "$SOURCE"
-          grep -q 'HTTPClient' "$SOURCE"
-          grep -q 'SIBOAT-MAIN' "$SOURCE"
+          echo
+          echo "=== Installed cores ==="
+          arduino-cli core list
 
-          echo "MAIN discovery integration verified."
-
-      - name: Prepare MAIN sketch
+      - name: Verify Main firmware source
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf build_work output/main
+          test -f A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
 
-          mkdir -p build_work/siboat_main
-          mkdir -p build_work/source
-          mkdir -p output/main/build
+          echo "Main firmware source found:"
+          ls -lh A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
+
+      - name: Prepare Main sketch directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p build/main
 
           cp \
             A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino \
-            build_work/source/siboat_main.cpp
+            build/main/A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
 
-          cat > build_work/siboat_main/siboat_main.ino <<'EOF'
-          #include "../source/siboat_main.cpp"
-          EOF
-
-          echo "MAIN sketch prepared:"
-          find build_work/siboat_main -maxdepth 2 -type f -print
-
-      - name: Compile ESP32 MAIN
+      - name: Compile ESP32 Main
         shell: bash
         run: |
           set -euo pipefail
 
-          FQBN="esp32:esp32:esp32:PartitionScheme=huge_app"
-          LOG="output/main/compile.log"
-
-          {
-            echo "=============================================="
-            echo "SIBOAT MAIN ESP32 BUILD"
-            echo "=============================================="
-            echo "Arduino-ESP32 core: $ESP32_CORE"
-            echo "FQBN: $FQBN"
-            echo "Partition: Huge APP"
-            echo "Source: A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
-            echo ""
-          } | tee "$LOG"
+          mkdir -p output/main
 
           arduino-cli compile \
-            --fqbn "$FQBN" \
-            --output-dir output/main/build \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
             --export-binaries \
-            --warnings none \
-            --clean \
-            build_work/siboat_main \
-            2>&1 | tee -a "$LOG"
+            --output-dir output/main \
+            build/main
 
-      - name: Verify and collect MAIN binaries
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUT="output/main"
-          BUILD="$OUT/build"
-
-          echo "Generated MAIN files:"
-          find "$BUILD" -type f 2>/dev/null | sort || true
-
-          APP="$(
-            find "$BUILD" \
-              -type f \
-              -name 'siboat_main.ino.bin' \
-              -print -quit 2>/dev/null || true
-          )"
-
-          BOOT="$(
-            find "$BUILD" \
-              -type f \
-              -name 'siboat_main.ino.bootloader.bin' \
-              -print -quit 2>/dev/null || true
-          )"
-
-          PART="$(
-            find "$BUILD" \
-              -type f \
-              -name 'siboat_main.ino.partitions.bin' \
-              -print -quit 2>/dev/null || true
-          )"
-
-          BOOT_APP0="$(
-            find "$HOME/.arduino15/packages/esp32" \
-              -type f \
-              -path '*/tools/partitions/boot_app0.bin' \
-              -print -quit 2>/dev/null || true
-          )"
-
-          test -s "$APP"
-          test -s "$BOOT"
-          test -s "$PART"
-          test -s "$BOOT_APP0"
-
-          cp "$APP" \
-            "$OUT/SIBOAT_MAIN_ESP32_APP.bin"
-
-          cp "$BOOT" \
-            "$OUT/SIBOAT_MAIN_ESP32_BOOTLOADER.bin"
-
-          cp "$PART" \
-            "$OUT/SIBOAT_MAIN_ESP32_PARTITIONS.bin"
-
-          cp "$BOOT_APP0" \
-            "$OUT/SIBOAT_MAIN_ESP32_BOOT_APP0.bin"
-
-          cat > "$OUT/build_info.txt" <<EOF
-          SIBOAT MAIN ESP32 BUILD
-
-          Git commit: $GITHUB_SHA
-
-          Arduino-ESP32 core: $ESP32_CORE
-
-          FQBN:
-          esp32:esp32:esp32:PartitionScheme=huge_app
-
-          Source:
-          A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
-
-          Wi-Fi profile order:
-          SSID1 = SIBOAT NETWORK
-          SSID2 = bleach.
-          SSID3 = Private Wifi
-
-          Discovery:
-          Device ID = SIBOAT-MAIN
-          RPC = seabot_register_device
-
-          Intended MAIN static IP:
-          10.90.102.50
-          EOF
-
-      - name: Create MAIN all-in-one binary
+      - name: Collect Main binaries
         shell: bash
         run: |
           set -euo pipefail
 
           OUT="output/main"
 
-          python3 - <<'PY'
+          echo "=== Compiler output ==="
+          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
+
+          APP="$(find "$OUT" -maxdepth 1 -type f -name '*.bin' \
+            ! -name '*bootloader*' \
+            ! -name '*partitions*' \
+            ! -name '*boot_app0*' \
+            | head -n 1)"
+
+          BOOT="$(find "$OUT" -maxdepth 1 -type f -name '*bootloader*.bin' | head -n 1)"
+          PART="$(find "$OUT" -maxdepth 1 -type f -name '*partitions*.bin' | head -n 1)"
+          BOOT_APP0="$(find "$OUT" -maxdepth 1 -type f -name '*boot_app0*.bin' | head -n 1)"
+
+          test -n "$APP"
+          test -n "$BOOT"
+          test -n "$PART"
+          test -n "$BOOT_APP0"
+
+          cp "$APP" "$OUT/SIBOAT_MAIN_ESP32_APP.bin"
+          cp "$BOOT" "$OUT/SIBOAT_MAIN_ESP32_BOOTLOADER.bin"
+          cp "$PART" "$OUT/SIBOAT_MAIN_ESP32_PARTITIONS.bin"
+          cp "$BOOT_APP0" "$OUT/SIBOAT_MAIN_ESP32_BOOT_APP0.bin"
+
+      - name: Create Main all-in-one binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
           from pathlib import Path
 
           out = Path("output/main")
@@ -264,13 +144,19 @@ jobs:
           def pad_to(data, address):
               if len(data) > address:
                   raise SystemExit(
-                      f"Binary is larger than its target address: "
+                      f"Binary is larger than target address: "
                       f"{len(data)} > {address}"
                   )
 
               return data + bytes(address - len(data))
 
           image = bytearray()
+
+          # ESP32 flash layout:
+          # 0x1000 bootloader
+          # 0x8000 partition table
+          # 0xE000 boot_app0
+          # 0x10000 application
 
           image += pad_to(boot, 0x1000)
 
@@ -298,7 +184,46 @@ jobs:
           )
           PY
 
-      - name: Package MAIN flash files
+      - name: Create Main build information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="output/main"
+
+          cat > "$OUT/build_info.txt" <<EOF
+          SIBOAT ESP32 MAIN FIRMWARE
+
+          Board:
+          ESP32 Dev Module
+
+          FQBN:
+          esp32:esp32:esp32:PartitionScheme=huge_app
+
+          ESP32 Arduino Core:
+          3.3.5
+
+          Source:
+          A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
+
+          Git commit:
+          ${GITHUB_SHA}
+
+          Git branch:
+          ${GITHUB_REF_NAME}
+
+          Build date:
+          $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          Flash addresses:
+
+          0x1000  SIBOAT_MAIN_ESP32_BOOTLOADER.bin
+          0x8000  SIBOAT_MAIN_ESP32_PARTITIONS.bin
+          0xE000  SIBOAT_MAIN_ESP32_BOOT_APP0.bin
+          0x10000 SIBOAT_MAIN_ESP32_APP.bin
+          EOF
+
+      - name: Package Main flash files
         shell: bash
         run: |
           set -euo pipefail
@@ -324,7 +249,7 @@ jobs:
           cp "$OUT/build_info.txt" \
             "$OUT/SIBOAT_MAIN_ESP32_FLASH_PACKAGE/"
 
-      - name: Upload MAIN firmware
+      - name: Upload Main firmware
         uses: actions/upload-artifact@v4
         with:
           name: SIBOAT_MAIN_ESP32_FIRMWARE
@@ -337,7 +262,7 @@ jobs:
             output/main/build_info.txt
           if-no-files-found: error
 
-      - name: Upload MAIN flash package
+      - name: Upload Main flash package
         uses: actions/upload-artifact@v4
         with:
           name: SIBOAT_MAIN_ESP32_FLASH_PACKAGE
@@ -345,16 +270,15 @@ jobs:
           if-no-files-found: error
 
 
-  # ==========================================================
+  # ============================================================
   # ESP32-CAM
-  # ==========================================================
+  # ============================================================
   build-cam:
-    name: Build ESP32-CAM
+    name: Build ESP32-CAM Firmware
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -363,281 +287,131 @@ jobs:
         with:
           version: "1.x"
 
-      - name: Install ESP32 Arduino core
+      - name: Initialize Arduino CLI
         shell: bash
         run: |
           set -euo pipefail
 
           arduino-cli config init
-          arduino-cli config add board_manager.additional_urls "$ESP32_INDEX_URL"
-          arduino-cli core update-index --additional-urls "$ESP32_INDEX_URL"
-          arduino-cli core install "esp32:esp32@${ESP32_CORE}" \
-            --additional-urls "$ESP32_INDEX_URL"
 
-          echo "Installed ESP32 core:"
-          arduino-cli core list | grep '^esp32:esp32' || true
-
-      - name: Locate Edge Impulse library
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ZIP="siboat_inferencing.zip"
-
-          if [ ! -f "$ZIP" ]; then
-            echo "ERROR: $ZIP was not found."
-            echo ""
-            echo "The ESP32-CAM build requires:"
-            echo "  siboat_inferencing.zip"
-            echo ""
-            echo "Place it in the repository root."
-            exit 1
-          fi
-
-          ls -lh "$ZIP"
-
-      - name: Enable unsafe ZIP library installation
-        shell: bash
-        run: |
-          set -euo pipefail
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
           arduino-cli config set library.enable_unsafe_install true
 
-          echo "Arduino CLI unsafe library installation enabled."
+      - name: Update Arduino indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          arduino-cli core update-index
 
-      - name: Install Edge Impulse library
+      - name: Install ESP32 Arduino core 3.3.5
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf build_work/library
-          mkdir -p build_work/library
+          arduino-cli core install esp32:esp32@3.3.5
+
+      - name: Show toolchain information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Arduino CLI ==="
+          arduino-cli version
+
+          echo
+          echo "=== Installed cores ==="
+          arduino-cli core list
+
+      - name: Verify CAM firmware source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
+
+          echo "CAM firmware source found:"
+          ls -lh A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
+
+      - name: Verify Edge Impulse library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f siboat_inferencing.zip
+
+          echo "Edge Impulse library found:"
+          ls -lh siboat_inferencing.zip
+
+      - name: Install Edge Impulse inference library
+        shell: bash
+        run: |
+          set -euo pipefail
 
           arduino-cli lib install \
-            --zip-path "$PWD/siboat_inferencing.zip"
+            --zip-path siboat_inferencing.zip
 
-          echo "Installed libraries:"
-          arduino-cli lib list
-
-      - name: Verify CAM source and Wi-Fi profile order
+      - name: Prepare CAM sketch directory
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE="A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
-
-          test -f "$SOURCE"
-
-          python3 - "$SOURCE" <<'PY'
-          from pathlib import Path
-          import sys
-
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8", errors="strict")
-
-          required = [
-              '{ "SIBOAT NETWORK",',
-              '{ "bleach.",',
-              '{ "Private Wifi",',
-          ]
-
-          positions = []
-
-          for token in required:
-              pos = text.find(token)
-
-              if pos < 0:
-                  raise SystemExit(
-                      f"Missing required Wi-Fi profile token in "
-                      f"{path.name}: {token}"
-                  )
-
-              positions.append(pos)
-
-          if positions != sorted(positions):
-              raise SystemExit(
-                  "Wi-Fi profile order is not SSID1 -> SSID2 -> SSID3"
-              )
-
-          print(
-              f"Verified {path.name}: "
-              "SSID1 -> SSID2 -> SSID3"
-          )
-          PY
-
-      - name: Verify CAM discovery integration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SOURCE="A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
-
-          grep -q 'SIBOAT_DISCOVERY_DEVICE_ID' "$SOURCE"
-          grep -q 'SIBOAT-CAM' "$SOURCE"
-          grep -q 'seabot_register_device' "$SOURCE"
-          grep -q 'WiFiClientSecure' "$SOURCE"
-          grep -q 'HTTPClient' "$SOURCE"
-          grep -q 'ESPmDNS' "$SOURCE"
-
-          echo "CAM discovery integration verified."
-
-      - name: Prepare CAM sketch
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf build_work/siboat_cam output/cam
-
-          mkdir -p build_work/siboat_cam
-          mkdir -p build_work/source
-          mkdir -p output/cam/build
+          mkdir -p build/cam
 
           cp \
             A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino \
-            build_work/source/siboat_cam.cpp
-
-          cat > build_work/siboat_cam/siboat_cam.ino <<'EOF'
-          #include "../source/siboat_cam.cpp"
-          EOF
-
-          echo "CAM sketch prepared:"
-          find build_work/siboat_cam -maxdepth 2 -type f -print
+            build/cam/A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
 
       - name: Compile ESP32-CAM
         shell: bash
         run: |
           set -euo pipefail
 
-          FQBN="esp32:esp32:esp32cam:PartitionScheme=huge_app"
-          LOG="output/cam/compile.log"
-
-          {
-            echo "=============================================="
-            echo "SIBOAT ESP32-CAM BUILD"
-            echo "=============================================="
-            echo "Arduino-ESP32 core: $ESP32_CORE"
-            echo "FQBN: $FQBN"
-            echo "Board: AI Thinker ESP32-CAM"
-            echo "Partition: Huge APP"
-            echo "PSRAM: board definition enables PSRAM"
-            echo "Source: A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
-            echo "Edge Impulse library: siboat_inferencing.zip"
-            echo ""
-          } | tee "$LOG"
+          mkdir -p output/cam
 
           arduino-cli compile \
-            --fqbn "$FQBN" \
-            --library "$PWD/build_work/library/siboat_inferencing" \
-            --output-dir output/cam/build \
+            --fqbn "esp32:esp32:esp32cam:PartitionScheme=huge_app" \
             --export-binaries \
-            --warnings none \
-            --clean \
-            build_work/siboat_cam \
-            2>&1 | tee -a "$LOG"
+            --output-dir output/cam \
+            build/cam
 
-      - name: Verify and collect CAM binaries
-        if: always()
+      - name: Collect CAM binaries
         shell: bash
         run: |
           set -euo pipefail
 
           OUT="output/cam"
-          BUILD="$OUT/build"
 
-          echo "Generated CAM files:"
-          find "$BUILD" -type f 2>/dev/null | sort || true
+          echo "=== Compiler output ==="
+          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
 
-          APP="$(
-            find "$BUILD" \
-              -type f \
-              -name 'siboat_cam.ino.bin' \
-              -print -quit 2>/dev/null || true
-          )"
+          APP="$(find "$OUT" -maxdepth 1 -type f -name '*.bin' \
+            ! -name '*bootloader*' \
+            ! -name '*partitions*' \
+            ! -name '*boot_app0*' \
+            | head -n 1)"
 
-          BOOT="$(
-            find "$BUILD" \
-              -type f \
-              -name 'siboat_cam.ino.bootloader.bin' \
-              -print -quit 2>/dev/null || true
-          )"
+          BOOT="$(find "$OUT" -maxdepth 1 -type f -name '*bootloader*.bin' | head -n 1)"
+          PART="$(find "$OUT" -maxdepth 1 -type f -name '*partitions*.bin' | head -n 1)"
+          BOOT_APP0="$(find "$OUT" -maxdepth 1 -type f -name '*boot_app0*.bin' | head -n 1)"
 
-          PART="$(
-            find "$BUILD" \
-              -type f \
-              -name 'siboat_cam.ino.partitions.bin' \
-              -print -quit 2>/dev/null || true
-          )"
+          test -n "$APP"
+          test -n "$BOOT"
+          test -n "$PART"
+          test -n "$BOOT_APP0"
 
-          BOOT_APP0="$(
-            find "$HOME/.arduino15/packages/esp32" \
-              -type f \
-              -path '*/tools/partitions/boot_app0.bin' \
-              -print -quit 2>/dev/null || true
-          )"
-
-          test -s "$APP"
-          test -s "$BOOT"
-          test -s "$PART"
-          test -s "$BOOT_APP0"
-
-          cp "$APP" \
-            "$OUT/SIBOAT_ESP32_CAM_APP.bin"
-
-          cp "$BOOT" \
-            "$OUT/SIBOAT_ESP32_CAM_BOOTLOADER.bin"
-
-          cp "$PART" \
-            "$OUT/SIBOAT_ESP32_CAM_PARTITIONS.bin"
-
-          cp "$BOOT_APP0" \
-            "$OUT/SIBOAT_ESP32_CAM_BOOT_APP0.bin"
-
-          cat > "$OUT/build_info.txt" <<EOF
-          SIBOAT ESP32-CAM BUILD
-
-          Git commit: $GITHUB_SHA
-
-          Arduino-ESP32 core: $ESP32_CORE
-
-          FQBN:
-          esp32:esp32:esp32cam:PartitionScheme=huge_app
-
-          Board:
-          AI Thinker ESP32-CAM
-
-          Source:
-          A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
-
-          Edge Impulse library:
-          siboat_inferencing.zip
-
-          Wi-Fi profile order:
-          SSID1 = SIBOAT NETWORK
-          SSID2 = bleach.
-          SSID3 = Private Wifi
-
-          Discovery:
-          Device ID = SIBOAT-CAM
-          RPC = seabot_register_device
-
-          Intended CAM static IP:
-          10.90.102.51
-
-          mDNS:
-          siboat-cam.local
-
-          HTTP/stream port:
-          81
-          EOF
+          cp "$APP" "$OUT/SIBOAT_ESP32_CAM_APP.bin"
+          cp "$BOOT" "$OUT/SIBOAT_ESP32_CAM_BOOTLOADER.bin"
+          cp "$PART" "$OUT/SIBOAT_ESP32_CAM_PARTITIONS.bin"
+          cp "$BOOT_APP0" "$OUT/SIBOAT_ESP32_CAM_BOOT_APP0.bin"
 
       - name: Create CAM all-in-one binary
         shell: bash
         run: |
           set -euo pipefail
 
-          OUT="output/cam"
-
-          python3 - <<'PY'
+          python3 <<'PY'
           from pathlib import Path
 
           out = Path("output/cam")
@@ -650,13 +424,19 @@ jobs:
           def pad_to(data, address):
               if len(data) > address:
                   raise SystemExit(
-                      f"Binary is larger than its target address: "
+                      f"Binary is larger than target address: "
                       f"{len(data)} > {address}"
                   )
 
               return data + bytes(address - len(data))
 
           image = bytearray()
+
+          # ESP32 flash layout:
+          # 0x1000 bootloader
+          # 0x8000 partition table
+          # 0xE000 boot_app0
+          # 0x10000 application
 
           image += pad_to(boot, 0x1000)
 
@@ -683,6 +463,48 @@ jobs:
               f"({target.stat().st_size} bytes)"
           )
           PY
+
+      - name: Create CAM build information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="output/cam"
+
+          cat > "$OUT/build_info.txt" <<EOF
+          SIBOAT ESP32-CAM FIRMWARE
+
+          Board:
+          ESP32-CAM
+
+          FQBN:
+          esp32:esp32:esp32cam:PartitionScheme=huge_app
+
+          ESP32 Arduino Core:
+          3.3.5
+
+          Source:
+          A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
+
+          Edge Impulse library:
+          siboat_inferencing.zip
+
+          Git commit:
+          ${GITHUB_SHA}
+
+          Git branch:
+          ${GITHUB_REF_NAME}
+
+          Build date:
+          $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          Flash addresses:
+
+          0x1000  SIBOAT_ESP32_CAM_BOOTLOADER.bin
+          0x8000  SIBOAT_ESP32_CAM_PARTITIONS.bin
+          0xE000  SIBOAT_ESP32_CAM_BOOT_APP0.bin
+          0x10000 SIBOAT_ESP32_CAM_APP.bin
+          EOF
 
       - name: Package CAM flash files
         shell: bash
