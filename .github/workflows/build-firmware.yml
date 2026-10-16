@@ -1,10 +1,16 @@
-name: Build SIBOAT ESP32 Firmware
+
+name: Build SIBOAT Main ESP32 Firmware
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+      - master
+    paths:
+      - "A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
+      - ".github/workflows/build-siboat-main-esp32.yml"
+
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,22 +23,36 @@ env:
 jobs:
 
   # ============================================================
-  # ESP32 MAIN
+  # BUILD SIBOAT MAIN ESP32
   # ============================================================
+
   build-main:
-    name: Build ESP32 Main
+
+    name: Compile SIBOAT Main ESP32
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
 
+      # --------------------------------------------------------
+      # 1. CHECKOUT SOURCE CODE
+      # --------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # 2. INSTALL ARDUINO CLI
+      # --------------------------------------------------------
 
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
         with:
           version: ${{ env.ARDUINO_CLI_VERSION }}
+
+      # --------------------------------------------------------
+      # 3. CONFIGURE ESP32 BOARD PACKAGE
+      # --------------------------------------------------------
 
       - name: Configure Arduino CLI
         shell: bash
@@ -44,6 +64,10 @@ jobs:
           arduino-cli config add board_manager.additional_urls \
             "${ESP32_BOARD_URL}"
 
+      # --------------------------------------------------------
+      # 4. UPDATE BOARD INDEX
+      # --------------------------------------------------------
+
       - name: Update Arduino indexes
         shell: bash
         run: |
@@ -51,7 +75,11 @@ jobs:
 
           arduino-cli core update-index
 
-      - name: Install ESP32 Arduino core
+      # --------------------------------------------------------
+      # 5. INSTALL ESP32 CORE 3.3.5
+      # --------------------------------------------------------
+
+      - name: Install ESP32 Arduino Core
         shell: bash
         run: |
           set -euo pipefail
@@ -59,42 +87,61 @@ jobs:
           arduino-cli core install \
             "esp32:esp32@${ESP32_CORE_VERSION}"
 
-      - name: Show build environment
+      # --------------------------------------------------------
+      # 6. VERIFY BUILD ENVIRONMENT
+      # --------------------------------------------------------
+
+      - name: Verify build environment
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== ARDUINO CLI ====="
+          echo "=========================================="
+          echo "ARDUINO CLI VERSION"
+          echo "=========================================="
+
           arduino-cli version
 
           echo
-          echo "===== ESP32 CORE ====="
+          echo "=========================================="
+          echo "INSTALLED ESP32 CORE"
+          echo "=========================================="
+
           arduino-cli core list
 
-      - name: Verify Main source
+      # --------------------------------------------------------
+      # 7. VERIFY MAIN FIRMWARE SOURCE
+      # --------------------------------------------------------
+
+      - name: Verify Main firmware source
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f \
-            "A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
+          SOURCE="A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
 
-          echo "Main source found."
+          if [ ! -s "$SOURCE" ]; then
+            echo "ERROR: Main ESP32 firmware source is missing."
+            exit 1
+          fi
 
-          ls -lh \
-            "A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
+          echo "Main firmware source found."
 
-      # ----------------------------------------------------------
-      # MAIN BUILD PREPARATION
+          ls -lh "$SOURCE"
+
+          # Confirm the expected firmware identity.
+          grep -q 'FW_VERSION "1.3.1"' "$SOURCE"
+
+          echo "Firmware identity check passed."
+
+      # --------------------------------------------------------
+      # 8. PREPARE ARDUINO SKETCH
       #
-      # The firmware is intentionally copied into .inc rather than
-      # compiled directly as .ino.
-      #
-      # This prevents Arduino's automatic .ino prototype generation
-      # from generating invalid prototypes for the firmware's custom
-      # types.
-      # ----------------------------------------------------------
-      - name: Prepare Main sketch
+      # The source is included as .inc to avoid Arduino IDE
+      # automatic prototype generation for custom data types.
+      # --------------------------------------------------------
+
+      - name: Prepare Main ESP32 sketch
         shell: bash
         run: |
           set -euo pipefail
@@ -109,9 +156,13 @@ jobs:
             "A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino" \
             "build/main/main_source.inc"
 
-          # Compatibility fix for Arduino/ESP32 compiler:
-          # avoid passing a StringSumHelper expression directly to
-          # sendJson(const char*).
+          # ----------------------------------------------------
+          # Apply the established StringSumHelper compatibility
+          # transformation used by the existing repository build.
+          #
+          # The source must contain exactly one matching expression.
+          # ----------------------------------------------------
+
           python3 <<'PY'
           from pathlib import Path
 
@@ -136,67 +187,65 @@ jobs:
 
           if count != 1:
               raise RuntimeError(
-                  "Expected exactly one StringSumHelper expression "
-                  f"to replace, but found {count}."
+                  "Expected exactly one StringSumHelper expression. "
+                  f"Found: {count}"
               )
 
           text = text.replace(old, new, 1)
 
           source.write_text(text, encoding="utf-8")
 
-          print("Main source prepared successfully.")
-          print("StringSumHelper compatibility fix applied.")
+          print("Main firmware source prepared successfully.")
+          print("Compiler compatibility transformation applied.")
           PY
 
+          # Arduino compilation wrapper.
           cat > build/main/main.ino <<'EOF'
           #include "main_source.inc"
           EOF
 
           echo
-          echo "===== MAIN SKETCH DIRECTORY ====="
+          echo "Prepared sketch files:"
 
-          find build/main \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
+          find build/main -maxdepth 1 -type f -printf '%f\n' | sort
 
-      # ----------------------------------------------------------
-      # NO CUSTOM PROTOTYPE VALIDATION
+      # --------------------------------------------------------
+      # 9. COMPILE MAIN ESP32 FIRMWARE
       #
-      # Do not add:
-      #   - forward-declaration validation
-      #   - Arduino --preprocess validation
-      #   - generated prototype checks
-      #
-      # The .inc wrapper is the workaround.
-      # ----------------------------------------------------------
-      - name: Compile ESP32 Main
+      # Board: ESP32 Dev Module
+      # Partition: huge_app
+      # Core: 3.3.5
+      # --------------------------------------------------------
+
+      - name: Compile Main ESP32 firmware
         shell: bash
         run: |
           set -euo pipefail
 
           arduino-cli compile \
             --clean \
+            --warnings all \
             --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
             --export-binaries \
             --output-dir "output/main" \
             "build/main"
 
-      - name: Verify Main compiler output
+      # --------------------------------------------------------
+      # 10. VERIFY COMPILER OUTPUT
+      # --------------------------------------------------------
+
+      - name: Verify compiled firmware images
         shell: bash
         run: |
           set -euo pipefail
 
           OUT="output/main"
 
-          echo "===== MAIN BUILD OUTPUT ====="
+          echo "=========================================="
+          echo "COMPILER OUTPUT"
+          echo "=========================================="
 
-          find "$OUT" \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
+          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
 
           test -s "$OUT/main.ino.bin"
           test -s "$OUT/main.ino.bootloader.bin"
@@ -204,9 +253,13 @@ jobs:
           test -s "$OUT/main.ino.merged.bin"
 
           echo
-          echo "ESP32 Main compilation succeeded."
+          echo "All required compiler images exist."
 
-      - name: Collect Main firmware images
+      # --------------------------------------------------------
+      # 11. CREATE FLASH-READY BIN FILES
+      # --------------------------------------------------------
+
+      - name: Collect Main ESP32 firmware images
         shell: bash
         run: |
           set -euo pipefail
@@ -230,7 +283,9 @@ jobs:
             "$OUT/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin"
 
           echo
-          echo "===== MAIN FIRMWARE IMAGES ====="
+          echo "=========================================="
+          echo "SIBOAT MAIN ESP32 FIRMWARE IMAGES"
+          echo "=========================================="
 
           ls -lh \
             "$OUT/SIBOAT_MAIN_ESP32_APP.bin" \
@@ -238,34 +293,32 @@ jobs:
             "$OUT/SIBOAT_MAIN_ESP32_PARTITIONS.bin" \
             "$OUT/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin"
 
-      - name: Create Main build information
+      # --------------------------------------------------------
+      # 12. GENERATE BUILD INFORMATION
+      # --------------------------------------------------------
+
+      - name: Generate build information
         shell: bash
         run: |
           set -euo pipefail
 
-          cat > output/main/build_info.txt <<EOF
-          SIBOAT ESP32 MAIN FIRMWARE
+          cat > output/main/BUILD_INFORMATION.txt <<EOF
+          SIBOAT MAIN ESP32 FIRMWARE
 
-          Source:
+          Firmware source:
           A1a_ESP32_MAIN_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
 
-          Build wrapper:
-          build/main/main.ino
-
-          Build source:
-          build/main/main_source.inc
-
           Board:
-          ESP32
+          ESP32 Dev Module
 
           FQBN:
           esp32:esp32:esp32:PartitionScheme=huge_app
 
-          ESP32 Arduino Core:
-          ${ESP32_CORE_VERSION}
-
           Arduino CLI:
           ${ARDUINO_CLI_VERSION}
+
+          ESP32 Arduino Core:
+          ${ESP32_CORE_VERSION}
 
           Git commit:
           ${GITHUB_SHA}
@@ -273,49 +326,148 @@ jobs:
           Git branch:
           ${GITHUB_REF_NAME}
 
-          Build time:
+          Build date:
           $(date -u +"%Y-%m-%d %H:%M:%S UTC")
 
-          Main all-in-one image:
+          FLASH-READY MERGED IMAGE:
           SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin
+
+          FLASH ADDRESS:
+          0x0
+
+          IMPORTANT:
+          The merged image contains the bootloader,
+          partition table, boot_app0 where applicable,
+          and application image at their required offsets.
+
+          Flash the merged image at 0x0.
+          Do not flash the merged image together with
+          the separate component images.
           EOF
 
-      - name: Create Main flash command
+      # --------------------------------------------------------
+      # 13. GENERATE FLASHING INSTRUCTIONS
+      # --------------------------------------------------------
+
+      - name: Generate flashing instructions
         shell: bash
         run: |
           set -euo pipefail
 
-          cat > output/main/flash_command.txt <<'EOF'
-          esptool --chip esp32 write-flash \
-            0x0 SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin
+          cat > output/main/FLASH_INSTRUCTIONS.txt <<'EOF'
+          SIBOAT MAIN ESP32 FLASHING INSTRUCTIONS
+
+          Recommended image:
+          SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin
+
+          Flash address:
+          0x0
+
+          Board:
+          ESP32 Dev Module
+
+          Recommended settings:
+          Chip: ESP32
+          Flash mode: DIO
+          Baud rate: 460800 (reduce if flashing fails)
+          Flash address: 0x0
+
+          IMPORTANT:
+          1. Select the ALL-IN-ONE image.
+          2. Set its flash address to 0x0.
+          3. Do not compile the INO in the flashing software.
+          4. Do not combine the merged image with component images.
+          5. After flashing, open Serial Monitor at 115200 baud.
+          6. Verify Wi-Fi connection and the actual IP address.
+
+          Separate component image offsets, if needed:
+
+          Bootloader:      0x1000
+          Partition table: 0x8000
+          boot_app0:       0xE000
+          Application:     0x10000
+
+          Use only images from this same build run.
           EOF
 
-      - name: Verify Main artifacts
+      # --------------------------------------------------------
+      # 14. GENERATE CHECKSUMS
+      # --------------------------------------------------------
+
+      - name: Generate SHA256 checksums
         shell: bash
         run: |
           set -euo pipefail
 
-          test -s \
-            "output/main/SIBOAT_MAIN_ESP32_APP.bin"
+          cd output/main
 
-          test -s \
-            "output/main/SIBOAT_MAIN_ESP32_BOOTLOADER.bin"
+          sha256sum \
+            SIBOAT_MAIN_ESP32_APP.bin \
+            SIBOAT_MAIN_ESP32_BOOTLOADER.bin \
+            SIBOAT_MAIN_ESP32_PARTITIONS.bin \
+            SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin \
+            > SHA256SUMS.txt
 
-          test -s \
-            "output/main/SIBOAT_MAIN_ESP32_PARTITIONS.bin"
+          cat SHA256SUMS.txt
 
-          test -s \
-            "output/main/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin"
+      # --------------------------------------------------------
+      # 15. CREATE COMPLETE FLASH PACKAGE ZIP
+      # --------------------------------------------------------
 
-          test -s \
-            "output/main/build_info.txt"
+      - name: Create Main ESP32 flash package
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          test -s \
-            "output/main/flash_command.txt"
+          cd output/main
 
-          echo "All Main firmware artifacts verified."
+          zip -9 \
+            SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip \
+            SIBOAT_MAIN_ESP32_APP.bin \
+            SIBOAT_MAIN_ESP32_BOOTLOADER.bin \
+            SIBOAT_MAIN_ESP32_PARTITIONS.bin \
+            SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin \
+            BUILD_INFORMATION.txt \
+            FLASH_INSTRUCTIONS.txt \
+            SHA256SUMS.txt
 
-      - name: Upload Main firmware
+          echo
+          echo "Flash package created."
+
+          ls -lh SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip
+
+      # --------------------------------------------------------
+      # 16. FINAL ARTIFACT VALIDATION
+      # --------------------------------------------------------
+
+      - name: Final firmware validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="output/main"
+
+          test -s "$OUT/SIBOAT_MAIN_ESP32_APP.bin"
+          test -s "$OUT/SIBOAT_MAIN_ESP32_BOOTLOADER.bin"
+          test -s "$OUT/SIBOAT_MAIN_ESP32_PARTITIONS.bin"
+          test -s "$OUT/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin"
+          test -s "$OUT/SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip"
+          test -s "$OUT/BUILD_INFORMATION.txt"
+          test -s "$OUT/FLASH_INSTRUCTIONS.txt"
+          test -s "$OUT/SHA256SUMS.txt"
+
+          unzip -t "$OUT/SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip"
+
+          echo
+          echo "=========================================="
+          echo "SIBOAT MAIN ESP32 BUILD SUCCESSFUL"
+          echo "=========================================="
+
+      # --------------------------------------------------------
+      # 17. UPLOAD INDIVIDUAL FIRMWARE ARTIFACTS
+      # --------------------------------------------------------
+
+      - name: Upload Main ESP32 firmware binaries
         uses: actions/upload-artifact@v4
         with:
           name: SIBOAT_MAIN_ESP32_FIRMWARE
@@ -324,285 +476,21 @@ jobs:
             output/main/SIBOAT_MAIN_ESP32_BOOTLOADER.bin
             output/main/SIBOAT_MAIN_ESP32_PARTITIONS.bin
             output/main/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin
-            output/main/build_info.txt
-            output/main/flash_command.txt
+            output/main/BUILD_INFORMATION.txt
+            output/main/FLASH_INSTRUCTIONS.txt
+            output/main/SHA256SUMS.txt
           if-no-files-found: error
+          compression-level: 0
 
+      # --------------------------------------------------------
+      # 18. UPLOAD COMPLETE FLASH PACKAGE
+      # --------------------------------------------------------
 
-  # ============================================================
-  # ESP32-CAM
-  #
-  # IMPORTANT:
-  # This section intentionally follows the Build 36 CAM path.
-  #
-  # Do NOT replace the ZIP installation with manual unzip logic.
-  # Build 37 failed specifically in that new preparation step.
-  # ============================================================
-  build-cam:
-    name: Build ESP32-CAM
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
-        with:
-          version: ${{ env.ARDUINO_CLI_VERSION }}
-
-      - name: Configure Arduino CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          arduino-cli config init
-
-          arduino-cli config add board_manager.additional_urls \
-            "${ESP32_BOARD_URL}"
-
-          arduino-cli config set \
-            library.enable_unsafe_install true
-
-      - name: Update Arduino indexes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          arduino-cli core update-index
-
-      - name: Install ESP32 Arduino core
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          arduino-cli core install \
-            "esp32:esp32@${ESP32_CORE_VERSION}"
-
-      - name: Show CAM build environment
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "===== ARDUINO CLI ====="
-          arduino-cli version
-
-          echo
-          echo "===== ESP32 CORE ====="
-          arduino-cli core list
-
-      - name: Verify CAM source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f \
-            "A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
-
-          echo "CAM source found."
-
-          ls -lh \
-            "A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino"
-
-      - name: Verify inference library
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f "siboat_inferencing.zip"
-
-          echo "Inference library found."
-
-          ls -lh "siboat_inferencing.zip"
-
-      # ========================================================
-      # THIS IS THE KNOWN-GOOD CAM LIBRARY INSTALLATION
-      #
-      # Do not manually unzip siboat_inferencing.zip.
-      # ========================================================
-      - name: Install inference library
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          arduino-cli lib install \
-            --zip-path "siboat_inferencing.zip"
-
-      - name: Prepare CAM sketch
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf build/cam
-          rm -rf output/cam
-
-          mkdir -p build/cam
-          mkdir -p output/cam
-
-          cp \
-            "A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino" \
-            "build/cam/cam.ino"
-
-          echo
-          echo "===== CAM SKETCH ====="
-
-          ls -lh build/cam/
-
-      - name: Compile ESP32-CAM
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          arduino-cli compile \
-            --clean \
-            --fqbn "esp32:esp32:esp32cam:PartitionScheme=huge_app" \
-            --export-binaries \
-            --output-dir "output/cam" \
-            "build/cam"
-
-      - name: Verify CAM compiler output
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUT="output/cam"
-
-          echo "===== CAM BUILD OUTPUT ====="
-
-          find "$OUT" \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
-
-          test -s "$OUT/cam.ino.bin"
-          test -s "$OUT/cam.ino.bootloader.bin"
-          test -s "$OUT/cam.ino.partitions.bin"
-          test -s "$OUT/cam.ino.merged.bin"
-
-          echo
-          echo "ESP32-CAM compilation succeeded."
-
-      - name: Collect CAM firmware images
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUT="output/cam"
-
-          cp \
-            "$OUT/cam.ino.bin" \
-            "$OUT/SIBOAT_ESP32_CAM_APP.bin"
-
-          cp \
-            "$OUT/cam.ino.bootloader.bin" \
-            "$OUT/SIBOAT_ESP32_CAM_BOOTLOADER.bin"
-
-          cp \
-            "$OUT/cam.ino.partitions.bin" \
-            "$OUT/SIBOAT_ESP32_CAM_PARTITIONS.bin"
-
-          cp \
-            "$OUT/cam.ino.merged.bin" \
-            "$OUT/SIBOAT_ESP32_CAM_ALL-IN-ONE.bin"
-
-          echo
-          echo "===== CAM FIRMWARE IMAGES ====="
-
-          ls -lh \
-            "$OUT/SIBOAT_ESP32_CAM_APP.bin" \
-            "$OUT/SIBOAT_ESP32_CAM_BOOTLOADER.bin" \
-            "$OUT/SIBOAT_ESP32_CAM_PARTITIONS.bin" \
-            "$OUT/SIBOAT_ESP32_CAM_ALL-IN-ONE.bin"
-
-      - name: Create CAM build information
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cat > output/cam/build_info.txt <<EOF
-          SIBOAT ESP32-CAM FIRMWARE
-
-          Source:
-          A1b_ESP32_CAM_FIRMWARE_SSID_CONFIGURED_DISCOVERY.ino
-
-          Build wrapper:
-          build/cam/cam.ino
-
-          Board:
-          ESP32-CAM
-
-          FQBN:
-          esp32:esp32:esp32cam:PartitionScheme=huge_app
-
-          ESP32 Arduino Core:
-          ${ESP32_CORE_VERSION}
-
-          Arduino CLI:
-          ${ARDUINO_CLI_VERSION}
-
-          Inference library:
-          siboat_inferencing.zip
-
-          Git commit:
-          ${GITHUB_SHA}
-
-          Git branch:
-          ${GITHUB_REF_NAME}
-
-          Build time:
-          $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-
-          CAM all-in-one image:
-          SIBOAT_ESP32_CAM_ALL-IN-ONE.bin
-          EOF
-
-      - name: Create CAM flash command
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cat > output/cam/flash_command.txt <<'EOF'
-          esptool --chip esp32 write-flash \
-            0x0 SIBOAT_ESP32_CAM_ALL-IN-ONE.bin
-          EOF
-
-      - name: Verify CAM artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -s \
-            "output/cam/SIBOAT_ESP32_CAM_APP.bin"
-
-          test -s \
-            "output/cam/SIBOAT_ESP32_CAM_BOOTLOADER.bin"
-
-          test -s \
-            "output/cam/SIBOAT_ESP32_CAM_PARTITIONS.bin"
-
-          test -s \
-            "output/cam/SIBOAT_ESP32_CAM_ALL-IN-ONE.bin"
-
-          test -s \
-            "output/cam/build_info.txt"
-
-          test -s \
-            "output/cam/flash_command.txt"
-
-          echo "All CAM firmware artifacts verified."
-
-      - name: Upload CAM firmware
+      - name: Upload Main ESP32 flash package
         uses: actions/upload-artifact@v4
         with:
-          name: SIBOAT_ESP32_CAM_FIRMWARE
+          name: SIBOAT_MAIN_ESP32_FLASH_PACKAGE
           path: |
-            output/cam/SIBOAT_ESP32_CAM_APP.bin
-            output/cam/SIBOAT_ESP32_CAM_BOOTLOADER.bin
-            output/cam/SIBOAT_ESP32_CAM_PARTITIONS.bin
-            output/cam/SIBOAT_ESP32_CAM_ALL-IN-ONE.bin
-            output/cam/build_info.txt
-            output/cam/flash_command.txt
+            output/main/SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip
           if-no-files-found: error
+          compression-level: 0
