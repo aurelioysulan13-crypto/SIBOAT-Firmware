@@ -18,18 +18,29 @@ env:
   ARDUINO_CLI_VERSION: "1.5.1"
   ESP32_CORE_VERSION: "3.3.5"
   ESP32_BOARD_URL: "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+
   MAIN_SKETCH_DIR: "firmware/main/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS"
   CAM_SKETCH_DIR: "firmware/cam/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS"
 
 jobs:
+
+  # ========================================================================
+  # MAIN ESP32
+  # ========================================================================
+
   build-main:
     name: Compile SIBOAT Main ESP32
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # --------------------------------------------------------------------
+      # Arduino CLI
+      # --------------------------------------------------------------------
 
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -39,21 +50,87 @@ jobs:
       - name: Configure Arduino CLI
         run: |
           set -euo pipefail
+
           arduino-cli config init
-          arduino-cli config add board_manager.additional_urls "${ESP32_BOARD_URL}"
+
+          arduino-cli config add board_manager.additional_urls \
+            "${ESP32_BOARD_URL}"
+
           arduino-cli core update-index
-          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
+
+          arduino-cli core install \
+            "esp32:esp32@${ESP32_CORE_VERSION}"
+
+      # --------------------------------------------------------------------
+      # Verify actual current Main firmware
+      # --------------------------------------------------------------------
 
       - name: Verify Main firmware source
         run: |
           set -euo pipefail
+
           SOURCE="${MAIN_SKETCH_DIR}/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
+
+          echo "Checking:"
+          echo "$SOURCE"
 
           test -s "$SOURCE"
 
-          grep -q '#define FW_VERSION "1.6.0-final-ota-ble-outbox"' "$SOURCE"
+          grep -q \
+            '#define FW_VERSION "1.6.0-final-ota-ble-outbox"' \
+            "$SOURCE"
 
-          echo "Verified Main source: $SOURCE"
+          grep -q \
+            '#include "siboat_secrets.h"' \
+            "$SOURCE"
+
+          echo "Main firmware source verified."
+          echo "Firmware version: 1.6.0-final-ota-ble-outbox"
+
+      # --------------------------------------------------------------------
+      # Create Main secrets header
+      #
+      # The real siboat_secrets.h is NEVER committed to the public repo.
+      #
+      # If SIBOAT_SECRETS_H exists as a GitHub Actions secret, it is used.
+      #
+      # Otherwise the public example header is copied so that the firmware
+      # can still be compile-tested.
+      # --------------------------------------------------------------------
+
+      - name: Prepare Main secrets header
+        env:
+          SIBOAT_SECRETS_H: ${{ secrets.SIBOAT_SECRETS_H }}
+        run: |
+          set -euo pipefail
+
+          TARGET="${MAIN_SKETCH_DIR}/siboat_secrets.h"
+          EXAMPLE="${MAIN_SKETCH_DIR}/siboat_secrets.example.h"
+
+          if [ -n "${SIBOAT_SECRETS_H:-}" ]; then
+
+            printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
+
+            echo "Using GitHub Actions secret SIBOAT_SECRETS_H."
+
+          else
+
+            test -s "$EXAMPLE"
+
+            cp "$EXAMPLE" "$TARGET"
+
+            echo "SIBOAT_SECRETS_H is not configured."
+            echo "Using siboat_secrets.example.h for compile validation only."
+
+          fi
+
+          test -s "$TARGET"
+
+          echo "Main secrets header prepared."
+
+      # --------------------------------------------------------------------
+      # Compile Main ESP32
+      # --------------------------------------------------------------------
 
       - name: Compile Main ESP32
         run: |
@@ -70,36 +147,66 @@ jobs:
             --output-dir "output/main" \
             "${MAIN_SKETCH_DIR}"
 
+      # --------------------------------------------------------------------
+      # Verify generated Main binaries
+      # --------------------------------------------------------------------
+
       - name: Verify Main compiler output
         run: |
           set -euo pipefail
 
           OUT="output/main"
 
-          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "Generated files:"
+          find "$OUT" \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
 
-          test -s "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bin"
-          test -s "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bootloader.bin"
-          test -s "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.partitions.bin"
-          test -s "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.merged.bin"
+          test -s \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bin"
 
-      - name: Rename Main firmware images
+          test -s \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bootloader.bin"
+
+          test -s \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.partitions.bin"
+
+          test -s \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.merged.bin"
+
+          echo "All Main ESP32 binary outputs verified."
+
+      # --------------------------------------------------------------------
+      # Rename Main binaries
+      # --------------------------------------------------------------------
+
+      - name: Prepare Main firmware images
         run: |
           set -euo pipefail
 
           OUT="output/main"
 
-          cp "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bin" \
-             "$OUT/SIBOAT_MAIN_ESP32_APP.bin"
+          cp \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bin" \
+            "$OUT/SIBOAT_MAIN_ESP32_APP.bin"
 
-          cp "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bootloader.bin" \
-             "$OUT/SIBOAT_MAIN_ESP32_BOOTLOADER.bin"
+          cp \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.bootloader.bin" \
+            "$OUT/SIBOAT_MAIN_ESP32_BOOTLOADER.bin"
 
-          cp "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.partitions.bin" \
-             "$OUT/SIBOAT_MAIN_ESP32_PARTITIONS.bin"
+          cp \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.partitions.bin" \
+            "$OUT/SIBOAT_MAIN_ESP32_PARTITIONS.bin"
 
-          cp "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.merged.bin" \
-             "$OUT/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin"
+          cp \
+            "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.merged.bin" \
+            "$OUT/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin"
+
+      # --------------------------------------------------------------------
+      # Main build information
+      # --------------------------------------------------------------------
 
       - name: Generate Main build information
         run: |
@@ -108,11 +215,14 @@ jobs:
           cat > output/main/BUILD_INFORMATION.txt <<EOF
           SIBOAT MAIN ESP32 FIRMWARE
 
-          Source:
-          ${MAIN_SKETCH_DIR}/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino
+          Firmware:
+          SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS
 
           Firmware version:
           1.6.0-final-ota-ble-outbox
+
+          Source:
+          ${MAIN_SKETCH_DIR}/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino
 
           Board:
           ESP32 Dev Module
@@ -136,30 +246,50 @@ jobs:
           $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           EOF
 
+      # --------------------------------------------------------------------
+      # Main flashing instructions
+      # --------------------------------------------------------------------
+
       - name: Generate Main flashing instructions
         run: |
           cat > output/main/FLASH_INSTRUCTIONS.txt <<'EOF'
           SIBOAT MAIN ESP32
 
-          Recommended image:
+          Recommended firmware:
           SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin
 
-          Flash address:
+          All-in-one flash address:
           0x0
 
           Board:
           ESP32 Dev Module
 
-          Separate image offsets, if required:
-          Bootloader: 0x1000
-          Partition table: 0x8000
-          boot_app0: 0xE000
-          Application: 0x10000
+          Partition scheme:
+          Huge APP
 
-          Use images from the same GitHub Actions build only.
+          Separate image addresses:
+
+          Bootloader:
+          0x1000
+
+          Partition table:
+          0x8000
+
+          boot_app0:
+          0xE000
+
+          Application:
+          0x10000
+
+          IMPORTANT:
+          Use firmware images generated by the same GitHub Actions build.
           EOF
 
-      - name: Generate Main checksums
+      # --------------------------------------------------------------------
+      # Main checksums
+      # --------------------------------------------------------------------
+
+      - name: Generate Main SHA256 checksums
         run: |
           set -euo pipefail
 
@@ -172,13 +302,18 @@ jobs:
             SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin \
             > SHA256SUMS.txt
 
+      # --------------------------------------------------------------------
+      # Main flash package
+      # --------------------------------------------------------------------
+
       - name: Create Main flash package
         run: |
           set -euo pipefail
 
           cd output/main
 
-          zip -9 SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip \
+          zip -9 \
+            SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip \
             SIBOAT_MAIN_ESP32_APP.bin \
             SIBOAT_MAIN_ESP32_BOOTLOADER.bin \
             SIBOAT_MAIN_ESP32_PARTITIONS.bin \
@@ -186,6 +321,10 @@ jobs:
             BUILD_INFORMATION.txt \
             FLASH_INSTRUCTIONS.txt \
             SHA256SUMS.txt
+
+      # --------------------------------------------------------------------
+      # Main artifacts
+      # --------------------------------------------------------------------
 
       - name: Upload Main ESP32 firmware
         uses: actions/upload-artifact@v4
@@ -210,14 +349,24 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+
+  # ========================================================================
+  # ESP32-CAM
+  # ========================================================================
+
   build-cam:
     name: Compile SIBOAT ESP32-CAM
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # --------------------------------------------------------------------
+      # Arduino CLI
+      # --------------------------------------------------------------------
 
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -229,9 +378,18 @@ jobs:
           set -euo pipefail
 
           arduino-cli config init
-          arduino-cli config add board_manager.additional_urls "${ESP32_BOARD_URL}"
+
+          arduino-cli config add board_manager.additional_urls \
+            "${ESP32_BOARD_URL}"
+
           arduino-cli core update-index
-          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
+
+          arduino-cli core install \
+            "esp32:esp32@${ESP32_CORE_VERSION}"
+
+      # --------------------------------------------------------------------
+      # Verify actual current CAM firmware
+      # --------------------------------------------------------------------
 
       - name: Verify CAM firmware source
         run: |
@@ -239,17 +397,34 @@ jobs:
 
           SOURCE="${CAM_SKETCH_DIR}/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
 
+          echo "Checking:"
+          echo "$SOURCE"
+
           test -s "$SOURCE"
 
-          grep -q '#define CAM_FW_VERSION "1.4.0-ota"' "$SOURCE"
+          grep -q \
+            '#define CAM_FW_VERSION "1.4.0-ota"' \
+            "$SOURCE"
 
-          grep -q '#include <siboat_inferencing.h>' "$SOURCE"
+          grep -q \
+            '#include <siboat_inferencing.h>' \
+            "$SOURCE"
+
+          grep -q \
+            '#include "siboat_secrets.h"' \
+            "$SOURCE"
 
           test -s "siboat_inferencing.zip"
 
-          test -s "${CAM_SKETCH_DIR}/siboat_secrets.example.h"
+          test -s \
+            "${CAM_SKETCH_DIR}/siboat_secrets.example.h"
 
-          echo "Verified CAM source: $SOURCE"
+          echo "CAM firmware source verified."
+          echo "Firmware version: 1.4.0-ota"
+
+      # --------------------------------------------------------------------
+      # Create CAM secrets header
+      # --------------------------------------------------------------------
 
       - name: Prepare CAM secrets header
         env:
@@ -258,52 +433,97 @@ jobs:
           set -euo pipefail
 
           TARGET="${CAM_SKETCH_DIR}/siboat_secrets.h"
+          EXAMPLE="${CAM_SKETCH_DIR}/siboat_secrets.example.h"
 
           if [ -n "${SIBOAT_SECRETS_H:-}" ]; then
+
             printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
 
-            echo "Using repository secret SIBOAT_SECRETS_H for CAM build."
-          else
-            cp "${CAM_SKETCH_DIR}/siboat_secrets.example.h" "$TARGET"
+            echo "Using GitHub Actions secret SIBOAT_SECRETS_H."
 
-            echo "SIBOAT_SECRETS_H is not configured; using the public example header for compilation only."
+          else
+
+            test -s "$EXAMPLE"
+
+            cp "$EXAMPLE" "$TARGET"
+
+            echo "SIBOAT_SECRETS_H is not configured."
+            echo "Using siboat_secrets.example.h for compile validation only."
+
           fi
 
           test -s "$TARGET"
 
-      - name: Install SIBOAT Edge Impulse library
+          echo "CAM secrets header prepared."
+
+      # --------------------------------------------------------------------
+      # Extract Edge Impulse / SIBOAT inference library
+      # --------------------------------------------------------------------
+
+      - name: Prepare SIBOAT Edge Impulse library
         run: |
           set -euo pipefail
 
           EI_EXTRACT="$RUNNER_TEMP/siboat-ei"
           EI_COLLECTION="$RUNNER_TEMP/arduino-libraries"
 
-          rm -rf "$EI_EXTRACT" "$EI_COLLECTION"
+          rm -rf "$EI_EXTRACT"
+          rm -rf "$EI_COLLECTION"
 
-          mkdir -p "$EI_EXTRACT" "$EI_COLLECTION"
+          mkdir -p "$EI_EXTRACT"
+          mkdir -p "$EI_COLLECTION"
 
-          unzip -q "siboat_inferencing.zip" -d "$EI_EXTRACT"
+          unzip -q \
+            "siboat_inferencing.zip" \
+            -d "$EI_EXTRACT"
 
-          EI_LIB_ROOT="$(find "$EI_EXTRACT" \
-            -type f \
-            -name 'library.properties' \
-            -print -quit | xargs -r dirname)"
+          echo "Searching for library.properties..."
+
+          EI_LIB_ROOT="$(
+            find "$EI_EXTRACT" \
+              -type f \
+              -name 'library.properties' \
+              -print \
+              -quit \
+              | xargs -r dirname
+          )"
 
           test -n "$EI_LIB_ROOT"
 
-          EI_HEADER="$(find "$EI_LIB_ROOT" \
-            -type f \
-            -name 'siboat_inferencing.h' \
-            -print -quit)"
+          echo "Detected Edge Impulse library:"
+          echo "$EI_LIB_ROOT"
+
+          EI_HEADER="$(
+            find "$EI_LIB_ROOT" \
+              -type f \
+              -name 'siboat_inferencing.h' \
+              -print \
+              -quit
+          )"
 
           test -n "$EI_HEADER"
 
-          cp -a "$EI_LIB_ROOT" "$EI_COLLECTION/SIBOAT_Inferencing"
+          echo "Detected inference header:"
+          echo "$EI_HEADER"
 
-          echo "Edge Impulse library root: $EI_LIB_ROOT"
-          echo "Edge Impulse header: $EI_HEADER"
+          mkdir -p \
+            "$EI_COLLECTION/SIBOAT_Inferencing"
 
-          test -s "$EI_COLLECTION/SIBOAT_Inferencing/siboat_inferencing.h"
+          cp -a \
+            "$EI_LIB_ROOT"/. \
+            "$EI_COLLECTION/SIBOAT_Inferencing/"
+
+          test -s \
+            "$EI_COLLECTION/SIBOAT_Inferencing/siboat_inferencing.h"
+
+          test -f \
+            "$EI_COLLECTION/SIBOAT_Inferencing/library.properties"
+
+          echo "SIBOAT Edge Impulse library prepared."
+
+      # --------------------------------------------------------------------
+      # Compile CAM
+      # --------------------------------------------------------------------
 
       - name: Compile ESP32-CAM
         run: |
@@ -321,36 +541,66 @@ jobs:
             --output-dir "output/cam" \
             "${CAM_SKETCH_DIR}"
 
+      # --------------------------------------------------------------------
+      # Verify CAM binaries
+      # --------------------------------------------------------------------
+
       - name: Verify CAM compiler output
         run: |
           set -euo pipefail
 
           OUT="output/cam"
 
-          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "Generated files:"
+          find "$OUT" \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
 
-          test -s "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bin"
-          test -s "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bootloader.bin"
-          test -s "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.partitions.bin"
-          test -s "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.merged.bin"
+          test -s \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bin"
 
-      - name: Rename CAM firmware images
+          test -s \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bootloader.bin"
+
+          test -s \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.partitions.bin"
+
+          test -s \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.merged.bin"
+
+          echo "All ESP32-CAM binary outputs verified."
+
+      # --------------------------------------------------------------------
+      # Rename CAM binaries
+      # --------------------------------------------------------------------
+
+      - name: Prepare CAM firmware images
         run: |
           set -euo pipefail
 
           OUT="output/cam"
 
-          cp "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bin" \
-             "$OUT/SIBOAT_CAM_ESP32_APP.bin"
+          cp \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bin" \
+            "$OUT/SIBOAT_CAM_ESP32_APP.bin"
 
-          cp "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bootloader.bin" \
-             "$OUT/SIBOAT_CAM_ESP32_BOOTLOADER.bin"
+          cp \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.bootloader.bin" \
+            "$OUT/SIBOAT_CAM_ESP32_BOOTLOADER.bin"
 
-          cp "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.partitions.bin" \
-             "$OUT/SIBOAT_CAM_ESP32_PARTITIONS.bin"
+          cp \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.partitions.bin" \
+            "$OUT/SIBOAT_CAM_ESP32_PARTITIONS.bin"
 
-          cp "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.merged.bin" \
-             "$OUT/SIBOAT_CAM_ESP32_ALL-IN-ONE.bin"
+          cp \
+            "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.merged.bin" \
+            "$OUT/SIBOAT_CAM_ESP32_ALL-IN-ONE.bin"
+
+      # --------------------------------------------------------------------
+      # CAM build information
+      # --------------------------------------------------------------------
 
       - name: Generate CAM build information
         run: |
@@ -359,11 +609,14 @@ jobs:
           cat > output/cam/BUILD_INFORMATION.txt <<EOF
           SIBOAT ESP32-CAM FIRMWARE
 
-          Source:
-          ${CAM_SKETCH_DIR}/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino
+          Firmware:
+          SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS
 
           Firmware version:
           1.4.0-ota
+
+          Source:
+          ${CAM_SKETCH_DIR}/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino
 
           Board:
           AI Thinker ESP32-CAM
@@ -377,7 +630,7 @@ jobs:
           ESP32 Arduino Core:
           ${ESP32_CORE_VERSION}
 
-          Edge Impulse library:
+          Inference library:
           siboat_inferencing.zip
 
           Git commit:
@@ -390,6 +643,10 @@ jobs:
           $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           EOF
 
+      # --------------------------------------------------------------------
+      # CAM flashing instructions
+      # --------------------------------------------------------------------
+
       - name: Generate CAM flashing instructions
         run: |
           cat > output/cam/FLASH_INSTRUCTIONS.txt <<'EOF'
@@ -398,19 +655,24 @@ jobs:
           Board:
           AI Thinker ESP32-CAM
 
-          Recommended image:
+          Recommended firmware:
           SIBOAT_CAM_ESP32_ALL-IN-ONE.bin
 
-          Flash address:
+          All-in-one flash address:
           0x0
 
           Partition scheme:
           Huge APP
 
-          Use images from the same GitHub Actions build only.
+          IMPORTANT:
+          Use firmware images generated by the same GitHub Actions build.
           EOF
 
-      - name: Generate CAM checksums
+      # --------------------------------------------------------------------
+      # CAM checksums
+      # --------------------------------------------------------------------
+
+      - name: Generate CAM SHA256 checksums
         run: |
           set -euo pipefail
 
@@ -423,13 +685,18 @@ jobs:
             SIBOAT_CAM_ESP32_ALL-IN-ONE.bin \
             > SHA256SUMS.txt
 
+      # --------------------------------------------------------------------
+      # CAM flash package
+      # --------------------------------------------------------------------
+
       - name: Create CAM flash package
         run: |
           set -euo pipefail
 
           cd output/cam
 
-          zip -9 SIBOAT_CAM_ESP32_FLASH_PACKAGE.zip \
+          zip -9 \
+            SIBOAT_CAM_ESP32_FLASH_PACKAGE.zip \
             SIBOAT_CAM_ESP32_APP.bin \
             SIBOAT_CAM_ESP32_BOOTLOADER.bin \
             SIBOAT_CAM_ESP32_PARTITIONS.bin \
@@ -437,6 +704,10 @@ jobs:
             BUILD_INFORMATION.txt \
             FLASH_INSTRUCTIONS.txt \
             SHA256SUMS.txt
+
+      # --------------------------------------------------------------------
+      # CAM artifacts
+      # --------------------------------------------------------------------
 
       - name: Upload ESP32-CAM firmware
         uses: actions/upload-artifact@v4
