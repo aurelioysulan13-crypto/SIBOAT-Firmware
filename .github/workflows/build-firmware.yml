@@ -62,7 +62,7 @@ jobs:
             "esp32:esp32@${ESP32_CORE_VERSION}"
 
       # --------------------------------------------------------------------
-      # Verify actual current Main firmware
+      # Verify current Main firmware
       # --------------------------------------------------------------------
 
       - name: Verify Main firmware source
@@ -70,9 +70,6 @@ jobs:
           set -euo pipefail
 
           SOURCE="${MAIN_SKETCH_DIR}/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
-
-          echo "Checking:"
-          echo "$SOURCE"
 
           test -s "$SOURCE"
 
@@ -88,14 +85,26 @@ jobs:
           echo "Firmware version: 1.6.0-final-ota-ble-outbox"
 
       # --------------------------------------------------------------------
-      # Create Main secrets header
-      #
-      # The real siboat_secrets.h is NEVER committed to the public repo.
-      #
-      # If SIBOAT_SECRETS_H exists as a GitHub Actions secret, it is used.
-      #
-      # Otherwise the public example header is copied so that the firmware
-      # can still be compile-tested.
+      # Verify corrected Main type header
+      # --------------------------------------------------------------------
+
+      - name: Verify Main firmware type header
+        run: |
+          set -euo pipefail
+
+          TYPES_HEADER="${MAIN_SKETCH_DIR}/siboat_main_types.h"
+
+          test -s "$TYPES_HEADER"
+
+          grep -q "struct Motor" "$TYPES_HEADER"
+          grep -q "struct EventRec" "$TYPES_HEADER"
+          grep -q "struct WsClient" "$TYPES_HEADER"
+          grep -q "struct Jw" "$TYPES_HEADER"
+
+          echo "Main shared type header verified."
+
+      # --------------------------------------------------------------------
+      # Prepare Main secrets
       # --------------------------------------------------------------------
 
       - name: Prepare Main secrets header
@@ -108,20 +117,13 @@ jobs:
           EXAMPLE="${MAIN_SKETCH_DIR}/siboat_secrets.example.h"
 
           if [ -n "${SIBOAT_SECRETS_H:-}" ]; then
-
             printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
-
             echo "Using GitHub Actions secret SIBOAT_SECRETS_H."
-
           else
-
             test -s "$EXAMPLE"
-
             cp "$EXAMPLE" "$TARGET"
-
             echo "SIBOAT_SECRETS_H is not configured."
-            echo "Using siboat_secrets.example.h for compile validation only."
-
+            echo "Using example header for compilation only."
           fi
 
           test -s "$TARGET"
@@ -148,7 +150,7 @@ jobs:
             "${MAIN_SKETCH_DIR}"
 
       # --------------------------------------------------------------------
-      # Verify generated Main binaries
+      # Verify Main compiler output
       # --------------------------------------------------------------------
 
       - name: Verify Main compiler output
@@ -157,7 +159,6 @@ jobs:
 
           OUT="output/main"
 
-          echo "Generated files:"
           find "$OUT" \
             -maxdepth 1 \
             -type f \
@@ -176,10 +177,10 @@ jobs:
           test -s \
             "$OUT/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino.merged.bin"
 
-          echo "All Main ESP32 binary outputs verified."
+          echo "Main ESP32 compiler output verified."
 
       # --------------------------------------------------------------------
-      # Rename Main binaries
+      # Rename Main images
       # --------------------------------------------------------------------
 
       - name: Prepare Main firmware images
@@ -388,7 +389,7 @@ jobs:
             "esp32:esp32@${ESP32_CORE_VERSION}"
 
       # --------------------------------------------------------------------
-      # Verify actual current CAM firmware
+      # Verify current CAM firmware
       # --------------------------------------------------------------------
 
       - name: Verify CAM firmware source
@@ -396,9 +397,6 @@ jobs:
           set -euo pipefail
 
           SOURCE="${CAM_SKETCH_DIR}/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
-
-          echo "Checking:"
-          echo "$SOURCE"
 
           test -s "$SOURCE"
 
@@ -423,7 +421,7 @@ jobs:
           echo "Firmware version: 1.4.0-ota"
 
       # --------------------------------------------------------------------
-      # Create CAM secrets header
+      # Prepare CAM secrets
       # --------------------------------------------------------------------
 
       - name: Prepare CAM secrets header
@@ -436,20 +434,13 @@ jobs:
           EXAMPLE="${CAM_SKETCH_DIR}/siboat_secrets.example.h"
 
           if [ -n "${SIBOAT_SECRETS_H:-}" ]; then
-
             printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
-
             echo "Using GitHub Actions secret SIBOAT_SECRETS_H."
-
           else
-
             test -s "$EXAMPLE"
-
             cp "$EXAMPLE" "$TARGET"
-
             echo "SIBOAT_SECRETS_H is not configured."
-            echo "Using siboat_secrets.example.h for compile validation only."
-
+            echo "Using example header for compilation only."
           fi
 
           test -s "$TARGET"
@@ -457,7 +448,10 @@ jobs:
           echo "CAM secrets header prepared."
 
       # --------------------------------------------------------------------
-      # Extract Edge Impulse / SIBOAT inference library
+      # Prepare Edge Impulse library
+      #
+      # The current archive places siboat_inferencing.h under src/.
+      # Keep the complete library structure intact.
       # --------------------------------------------------------------------
 
       - name: Prepare SIBOAT Edge Impulse library
@@ -490,7 +484,7 @@ jobs:
 
           test -n "$EI_LIB_ROOT"
 
-          echo "Detected Edge Impulse library:"
+          echo "Detected library root:"
           echo "$EI_LIB_ROOT"
 
           EI_HEADER="$(
@@ -506,20 +500,28 @@ jobs:
           echo "Detected inference header:"
           echo "$EI_HEADER"
 
-          mkdir -p \
-            "$EI_COLLECTION/SIBOAT_Inferencing"
+          EI_LIBRARY="$EI_COLLECTION/SIBOAT_Inferencing"
+
+          mkdir -p "$EI_LIBRARY"
 
           cp -a \
             "$EI_LIB_ROOT"/. \
-            "$EI_COLLECTION/SIBOAT_Inferencing/"
-
-          test -s \
-            "$EI_COLLECTION/SIBOAT_Inferencing/siboat_inferencing.h"
+            "$EI_LIBRARY/"
 
           test -f \
-            "$EI_COLLECTION/SIBOAT_Inferencing/library.properties"
+            "$EI_LIBRARY/library.properties"
 
-          echo "SIBOAT Edge Impulse library prepared."
+          test -s \
+            "$EI_LIBRARY/src/siboat_inferencing.h"
+
+          echo "Edge Impulse library structure:"
+          find "$EI_LIBRARY" \
+            -maxdepth 3 \
+            -type f \
+            | sort \
+            | head -200
+
+          echo "SIBOAT Edge Impulse library prepared successfully."
 
       # --------------------------------------------------------------------
       # Compile CAM
@@ -542,7 +544,7 @@ jobs:
             "${CAM_SKETCH_DIR}"
 
       # --------------------------------------------------------------------
-      # Verify CAM binaries
+      # Verify CAM compiler output
       # --------------------------------------------------------------------
 
       - name: Verify CAM compiler output
@@ -551,7 +553,6 @@ jobs:
 
           OUT="output/cam"
 
-          echo "Generated files:"
           find "$OUT" \
             -maxdepth 1 \
             -type f \
@@ -570,10 +571,10 @@ jobs:
           test -s \
             "$OUT/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino.merged.bin"
 
-          echo "All ESP32-CAM binary outputs verified."
+          echo "ESP32-CAM compiler output verified."
 
       # --------------------------------------------------------------------
-      # Rename CAM binaries
+      # Rename CAM images
       # --------------------------------------------------------------------
 
       - name: Prepare CAM firmware images
