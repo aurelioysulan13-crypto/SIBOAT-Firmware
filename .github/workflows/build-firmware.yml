@@ -22,6 +22,7 @@ env:
   MAIN_SKETCH_DIR: "firmware/main/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS"
   CAM_SKETCH_DIR: "firmware/cam/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS"
 
+
 jobs:
 
   # ========================================================================
@@ -34,6 +35,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
+
+      # --------------------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------------------
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -62,7 +67,41 @@ jobs:
             "esp32:esp32@${ESP32_CORE_VERSION}"
 
       # --------------------------------------------------------------------
-      # Verify current Main firmware
+      # Repository cleanliness and required files
+      # --------------------------------------------------------------------
+
+      - name: Verify repository cleanliness
+        run: |
+          set -euo pipefail
+
+          echo "Checking repository structure..."
+
+          # Real secret headers must NEVER be committed to the repository.
+          test ! -e "${MAIN_SKETCH_DIR}/siboat_secrets.h"
+          test ! -e "${CAM_SKETCH_DIR}/siboat_secrets.h"
+
+          # Required public secret templates must exist.
+          test -s "${MAIN_SKETCH_DIR}/siboat_secrets.example.h"
+          test -s "${CAM_SKETCH_DIR}/siboat_secrets.example.h"
+
+          # Required Main firmware files.
+          test -s \
+            "${MAIN_SKETCH_DIR}/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
+
+          test -s \
+            "${MAIN_SKETCH_DIR}/siboat_main_types.h"
+
+          # Required CAM firmware.
+          test -s \
+            "${CAM_SKETCH_DIR}/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
+
+          # Required Edge Impulse archive.
+          test -s "siboat_inferencing.zip"
+
+          echo "Repository cleanliness check passed."
+
+      # --------------------------------------------------------------------
+      # Verify Main firmware
       # --------------------------------------------------------------------
 
       - name: Verify Main firmware source
@@ -85,7 +124,7 @@ jobs:
           echo "Firmware version: 1.6.0-final-ota-ble-outbox"
 
       # --------------------------------------------------------------------
-      # Verify corrected Main type header
+      # Verify Main shared type header
       # --------------------------------------------------------------------
 
       - name: Verify Main firmware type header
@@ -104,7 +143,7 @@ jobs:
           echo "Main shared type header verified."
 
       # --------------------------------------------------------------------
-      # Prepare Main secrets
+      # Prepare Main private secrets
       # --------------------------------------------------------------------
 
       - name: Prepare Main secrets header
@@ -114,21 +153,39 @@ jobs:
           set -euo pipefail
 
           TARGET="${MAIN_SKETCH_DIR}/siboat_secrets.h"
-          EXAMPLE="${MAIN_SKETCH_DIR}/siboat_secrets.example.h"
 
-          if [ -n "${SIBOAT_SECRETS_H:-}" ]; then
-            printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
-            echo "Using GitHub Actions secret SIBOAT_SECRETS_H."
-          else
-            test -s "$EXAMPLE"
-            cp "$EXAMPLE" "$TARGET"
-            echo "SIBOAT_SECRETS_H is not configured."
-            echo "Using example header for compilation only."
+          if [ -z "${SIBOAT_SECRETS_H:-}" ]; then
+            echo "::error::Repository secret SIBOAT_SECRETS_H is missing."
+            echo "::error::Create SIBOAT_SECRETS_H under Settings > Secrets and variables > Actions."
+            exit 1
           fi
+
+          printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
 
           test -s "$TARGET"
 
-          echo "Main secrets header prepared."
+          # Required Wi-Fi definitions.
+          grep -q '#define SIBOAT_SSID1 ' "$TARGET"
+          grep -q '#define SIBOAT_PASS1 ' "$TARGET"
+          grep -q '#define SIBOAT_SSID2 ' "$TARGET"
+          grep -q '#define SIBOAT_PASS2 ' "$TARGET"
+          grep -q '#define SIBOAT_SSID3 ' "$TARGET"
+          grep -q '#define SIBOAT_PASS3 ' "$TARGET"
+
+          # Required BLE definition.
+          grep -q '#define SIBOAT_BLE_PIN ' "$TARGET"
+
+          # Reject obvious placeholder credentials.
+          if grep -Eq \
+            'CHANGE_ME|YOUR_|YOUR_ACTUAL|REPLACE_ME|PUT_|ENTER_' \
+            "$TARGET"; then
+
+            echo "::error::SIBOAT_SECRETS_H contains placeholder values."
+            echo "::error::Replace the placeholder values with the real private configuration."
+            exit 1
+          fi
+
+          echo "Main private secrets header prepared and validated."
 
       # --------------------------------------------------------------------
       # Compile Main ESP32
@@ -180,7 +237,7 @@ jobs:
           echo "Main ESP32 compiler output verified."
 
       # --------------------------------------------------------------------
-      # Rename Main images
+      # Prepare Main firmware images
       # --------------------------------------------------------------------
 
       - name: Prepare Main firmware images
@@ -253,6 +310,8 @@ jobs:
 
       - name: Generate Main flashing instructions
         run: |
+          set -euo pipefail
+
           cat > output/main/FLASH_INSTRUCTIONS.txt <<'EOF'
           SIBOAT MAIN ESP32
 
@@ -362,6 +421,10 @@ jobs:
 
     steps:
 
+      # --------------------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -389,7 +452,27 @@ jobs:
             "esp32:esp32@${ESP32_CORE_VERSION}"
 
       # --------------------------------------------------------------------
-      # Verify current CAM firmware
+      # Repository cleanliness and required CAM files
+      # --------------------------------------------------------------------
+
+      - name: Verify CAM repository files
+        run: |
+          set -euo pipefail
+
+          test ! -e "${CAM_SKETCH_DIR}/siboat_secrets.h"
+
+          test -s \
+            "${CAM_SKETCH_DIR}/siboat_secrets.example.h"
+
+          test -s \
+            "${CAM_SKETCH_DIR}/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
+
+          test -s "siboat_inferencing.zip"
+
+          echo "CAM repository files verified."
+
+      # --------------------------------------------------------------------
+      # Verify CAM firmware
       # --------------------------------------------------------------------
 
       - name: Verify CAM firmware source
@@ -412,16 +495,11 @@ jobs:
             '#include "siboat_secrets.h"' \
             "$SOURCE"
 
-          test -s "siboat_inferencing.zip"
-
-          test -s \
-            "${CAM_SKETCH_DIR}/siboat_secrets.example.h"
-
           echo "CAM firmware source verified."
           echo "Firmware version: 1.4.0-ota"
 
       # --------------------------------------------------------------------
-      # Prepare CAM secrets
+      # Prepare CAM private secrets
       # --------------------------------------------------------------------
 
       - name: Prepare CAM secrets header
@@ -431,27 +509,42 @@ jobs:
           set -euo pipefail
 
           TARGET="${CAM_SKETCH_DIR}/siboat_secrets.h"
-          EXAMPLE="${CAM_SKETCH_DIR}/siboat_secrets.example.h"
 
-          if [ -n "${SIBOAT_SECRETS_H:-}" ]; then
-            printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
-            echo "Using GitHub Actions secret SIBOAT_SECRETS_H."
-          else
-            test -s "$EXAMPLE"
-            cp "$EXAMPLE" "$TARGET"
-            echo "SIBOAT_SECRETS_H is not configured."
-            echo "Using example header for compilation only."
+          if [ -z "${SIBOAT_SECRETS_H:-}" ]; then
+            echo "::error::Repository secret SIBOAT_SECRETS_H is missing."
+            echo "::error::Create SIBOAT_SECRETS_H under Settings > Secrets and variables > Actions."
+            exit 1
           fi
+
+          printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
 
           test -s "$TARGET"
 
-          echo "CAM secrets header prepared."
+          grep -q '#define SIBOAT_SSID1 ' "$TARGET"
+          grep -q '#define SIBOAT_PASS1 ' "$TARGET"
+          grep -q '#define SIBOAT_SSID2 ' "$TARGET"
+          grep -q '#define SIBOAT_PASS2 ' "$TARGET"
+          grep -q '#define SIBOAT_SSID3 ' "$TARGET"
+          grep -q '#define SIBOAT_PASS3 ' "$TARGET"
+          grep -q '#define SIBOAT_BLE_PIN ' "$TARGET"
+
+          if grep -Eq \
+            'CHANGE_ME|YOUR_|YOUR_ACTUAL|REPLACE_ME|PUT_|ENTER_' \
+            "$TARGET"; then
+
+            echo "::error::SIBOAT_SECRETS_H contains placeholder values."
+            echo "::error::Replace the placeholder values with the real private configuration."
+            exit 1
+          fi
+
+          echo "CAM private secrets header prepared and validated."
 
       # --------------------------------------------------------------------
       # Prepare Edge Impulse library
       #
-      # The current archive places siboat_inferencing.h under src/.
-      # Keep the complete library structure intact.
+      # The current archive contains the SIBOAT inference library.
+      # The workflow locates library.properties and preserves the
+      # complete Arduino library structure.
       # --------------------------------------------------------------------
 
       - name: Prepare SIBOAT Edge Impulse library
@@ -524,7 +617,7 @@ jobs:
           echo "SIBOAT Edge Impulse library prepared successfully."
 
       # --------------------------------------------------------------------
-      # Compile CAM
+      # Compile ESP32-CAM
       # --------------------------------------------------------------------
 
       - name: Compile ESP32-CAM
@@ -574,7 +667,7 @@ jobs:
           echo "ESP32-CAM compiler output verified."
 
       # --------------------------------------------------------------------
-      # Rename CAM images
+      # Prepare CAM firmware images
       # --------------------------------------------------------------------
 
       - name: Prepare CAM firmware images
@@ -647,6 +740,8 @@ jobs:
 
       - name: Generate CAM flashing instructions
         run: |
+          set -euo pipefail
+
           cat > output/cam/FLASH_INSTRUCTIONS.txt <<'EOF'
           SIBOAT ESP32-CAM
 
