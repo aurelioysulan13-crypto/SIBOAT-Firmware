@@ -1,0 +1,306 @@
+name: Build SIBOAT Main ESP32 and ESP32-CAM
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - "supabase/**"
+      - "scripts/**"
+      - "siboat_inferencing.zip"
+      - ".github/workflows/build-firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARDUINO_CLI_VERSION: "1.5.1"
+  ESP32_CORE_VERSION: "3.3.5"
+  ESP32_BOARD_URL: "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+  MAIN_DIR: "firmware/main/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS"
+  CAM_DIR: "firmware/cam/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS"
+
+jobs:
+  verify:
+    name: Verify repository package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify required files and firmware versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$MAIN_DIR/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
+          test -s "$MAIN_DIR/siboat_main_types.h"
+          test -s "$MAIN_DIR/siboat_secrets.example.h"
+          test -s "$CAM_DIR/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
+          test -s "$CAM_DIR/siboat_secrets.example.h"
+          test -s "siboat_inferencing.zip"
+          unzip -tq "siboat_inferencing.zip"
+          EI_CHECK_DIR="$(mktemp -d)"
+          unzip -q "siboat_inferencing.zip" -d "$EI_CHECK_DIR"
+          EI_HEADER="$(find "$EI_CHECK_DIR" -type f -name siboat_inferencing.h -print -quit)"
+          EI_PROPERTIES="$(find "$EI_CHECK_DIR" -type f -name library.properties -print -quit)"
+          test -n "$EI_HEADER"
+          test -n "$EI_PROPERTIES"
+          rm -rf "$EI_CHECK_DIR"
+
+          grep -Fq '#define FW_VERSION "1.7.1-manual-first"' \
+            "$MAIN_DIR/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
+          grep -Fq '#define CAM_FW_VERSION "1.5.0-camlink-ota"' \
+            "$CAM_DIR/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
+
+          grep -Fq '#include "siboat_main_types.h"' \
+            "$MAIN_DIR/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
+          grep -Fq '#include "siboat_secrets.h"' \
+            "$MAIN_DIR/SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
+          grep -Fq '#include "siboat_secrets.h"' \
+            "$CAM_DIR/SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
+
+          grep -Fq 'struct Motor' "$MAIN_DIR/siboat_main_types.h"
+          grep -Fq 'struct EventRec' "$MAIN_DIR/siboat_main_types.h"
+          grep -Fq 'struct WsClient' "$MAIN_DIR/siboat_main_types.h"
+          grep -Fq 'struct Jw' "$MAIN_DIR/siboat_main_types.h"
+
+          test ! -e "$MAIN_DIR/siboat_secrets.h"
+          test ! -e "$CAM_DIR/siboat_secrets.h"
+          python3 scripts/audit-interfaces.py
+          echo "Repository structure and firmware version checks passed."
+
+  build-main:
+    name: Compile Main ESP32
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+        with:
+          version: ${{ env.ARDUINO_CLI_VERSION }}
+
+      - name: Install ESP32 Arduino core
+        shell: bash
+        run: |
+          set -euo pipefail
+          arduino-cli core update-index --additional-urls "$ESP32_BOARD_URL"
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}" \
+            --additional-urls "$ESP32_BOARD_URL"
+
+      - name: Prepare private settings or compile-safe example
+        env:
+          SIBOAT_SECRETS_H: ${{ secrets.SIBOAT_SECRETS_H }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="$MAIN_DIR/siboat_secrets.h"
+          if [[ "$REPOSITORY_PRIVATE" == "true" && -n "${SIBOAT_SECRETS_H:-}" ]]; then
+            printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
+          else
+            cp "$MAIN_DIR/siboat_secrets.example.h" "$TARGET"
+            echo "::warning::Using example credentials. Firmware will compile but will not connect to your Wi-Fi until configured."
+          fi
+          grep -q 'SIBOAT_SSID1' "$TARGET"
+          grep -q 'SIBOAT_PASS1' "$TARGET"
+          grep -q 'SIBOAT_BLE_PIN' "$TARGET"
+
+      - name: Compile Main ESP32 with OTA-capable partition layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/main
+          arduino-cli compile \
+            --clean \
+            --warnings all \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
+            --export-binaries \
+            --output-dir build/main \
+            "$MAIN_DIR"
+
+          BASE="SIBOAT_MAIN-ESP32_FIRMWARE_FINAL_BOSS.ino"
+          test -s "build/main/${BASE}.bin"
+          test -s "build/main/${BASE}.merged.bin"
+          test -s "build/main/${BASE}.bootloader.bin"
+          test -s "build/main/${BASE}.partitions.bin"
+
+          cp "build/main/${BASE}.bin" "build/main/SIBOAT_MAIN_ESP32_APP.bin"
+          cp "build/main/${BASE}.merged.bin" "build/main/SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin"
+          cp "build/main/${BASE}.bootloader.bin" "build/main/SIBOAT_MAIN_ESP32_BOOTLOADER.bin"
+          cp "build/main/${BASE}.partitions.bin" "build/main/SIBOAT_MAIN_ESP32_PARTITIONS.bin"
+
+          cat > build/main/FLASH_INSTRUCTIONS.txt <<'EOF'
+          SIBOAT MAIN ESP32
+          Board: ESP32 Dev Module
+          Partition layout: min_spiffs (OTA-capable)
+          Recommended merged image: SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin
+          Flash merged image at address: 0x0
+
+          Separate image addresses:
+          Bootloader: 0x1000
+          Partition table: 0x8000
+          boot_app0: 0xE000 (use the matching ESP32 core boot_app0 image)
+          Application: 0x10000
+
+          Use the merged image from this same build for simplest flashing.
+          EOF
+
+          sha256sum build/main/*.bin > build/main/SHA256SUMS.txt
+          cat > build/main/BUILD_INFORMATION.txt <<EOF
+          Firmware version: 1.7.1-manual-first
+          Board: ESP32 Dev Module
+          FQBN: esp32:esp32:esp32:PartitionScheme=min_spiffs
+          Arduino CLI: ${ARDUINO_CLI_VERSION}
+          ESP32 core: ${ESP32_CORE_VERSION}
+          Commit: ${GITHUB_SHA}
+          Branch: ${GITHUB_REF_NAME}
+          Built: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+          (cd build/main && zip -9 SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip \
+            SIBOAT_MAIN_ESP32_APP.bin \
+            SIBOAT_MAIN_ESP32_ALL-IN-ONE.bin \
+            SIBOAT_MAIN_ESP32_BOOTLOADER.bin \
+            SIBOAT_MAIN_ESP32_PARTITIONS.bin \
+            FLASH_INSTRUCTIONS.txt BUILD_INFORMATION.txt SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SIBOAT_MAIN_ESP32_FLASH_PACKAGE
+          path: build/main/SIBOAT_MAIN_ESP32_FLASH_PACKAGE.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SIBOAT_MAIN_ESP32_BUILD_FILES
+          path: |
+            build/main/*.bin
+            build/main/*.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  build-cam:
+    name: Compile ESP32-CAM
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+        with:
+          version: ${{ env.ARDUINO_CLI_VERSION }}
+
+      - name: Install ESP32 Arduino core
+        shell: bash
+        run: |
+          set -euo pipefail
+          arduino-cli core update-index --additional-urls "$ESP32_BOARD_URL"
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}" \
+            --additional-urls "$ESP32_BOARD_URL"
+
+      - name: Prepare private settings or compile-safe example
+        env:
+          SIBOAT_SECRETS_H: ${{ secrets.SIBOAT_SECRETS_H }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="$CAM_DIR/siboat_secrets.h"
+          if [[ "$REPOSITORY_PRIVATE" == "true" && -n "${SIBOAT_SECRETS_H:-}" ]]; then
+            printf '%s\n' "$SIBOAT_SECRETS_H" > "$TARGET"
+          else
+            cp "$CAM_DIR/siboat_secrets.example.h" "$TARGET"
+            echo "::warning::Using example credentials. Firmware will compile but will not connect to your Wi-Fi until configured."
+          fi
+          grep -q 'SIBOAT_SSID1' "$TARGET"
+          grep -q 'SIBOAT_PASS1' "$TARGET"
+
+      - name: Install SIBOAT Edge Impulse Arduino library
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s siboat_inferencing.zip
+          mkdir -p "$RUNNER_TEMP/ei"
+          unzip -q siboat_inferencing.zip -d "$RUNNER_TEMP/ei"
+          LIBRARY_PROPERTIES="$(find "$RUNNER_TEMP/ei" -type f -name library.properties -print -quit)"
+          if [[ -z "$LIBRARY_PROPERTIES" ]]; then
+            echo "::error::The Edge Impulse archive does not contain library.properties."
+            exit 1
+          fi
+          LIBRARY_ROOT="$(dirname "$LIBRARY_PROPERTIES")"
+          mkdir -p "$HOME/Arduino/libraries/siboat_inferencing"
+          cp -a "$LIBRARY_ROOT"/. "$HOME/Arduino/libraries/siboat_inferencing/"
+          test -s "$HOME/Arduino/libraries/siboat_inferencing/library.properties"
+          test -s "$HOME/Arduino/libraries/siboat_inferencing/src/siboat_inferencing.h" || \
+            test -s "$HOME/Arduino/libraries/siboat_inferencing/siboat_inferencing.h"
+
+      - name: Compile AI Thinker ESP32-CAM with PSRAM
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/cam
+          arduino-cli compile \
+            --clean \
+            --warnings all \
+            --fqbn "esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=min_spiffs" \
+            --export-binaries \
+            --output-dir build/cam \
+            "$CAM_DIR"
+
+          BASE="SIBOAT_ESP32-CAM_FIRMWARE_FINAL_BOSS.ino"
+          test -s "build/cam/${BASE}.bin"
+          test -s "build/cam/${BASE}.merged.bin"
+          test -s "build/cam/${BASE}.bootloader.bin"
+          test -s "build/cam/${BASE}.partitions.bin"
+
+          cp "build/cam/${BASE}.bin" "build/cam/SIBOAT_ESP32_CAM_APP.bin"
+          cp "build/cam/${BASE}.merged.bin" "build/cam/SIBOAT_ESP32_CAM_ALL-IN-ONE.bin"
+          cp "build/cam/${BASE}.bootloader.bin" "build/cam/SIBOAT_ESP32_CAM_BOOTLOADER.bin"
+          cp "build/cam/${BASE}.partitions.bin" "build/cam/SIBOAT_ESP32_CAM_PARTITIONS.bin"
+
+          cat > build/cam/FLASH_INSTRUCTIONS.txt <<'EOF'
+          SIBOAT ESP32-CAM
+          Board: AI Thinker ESP32-CAM
+          PSRAM: Enabled
+          Partition layout: min_spiffs (OTA-capable)
+          Recommended merged image: SIBOAT_ESP32_CAM_ALL-IN-ONE.bin
+          Flash merged image at address: 0x0
+          Use a stable 5V supply and the correct USB-to-serial adapter wiring.
+          EOF
+
+          sha256sum build/cam/*.bin > build/cam/SHA256SUMS.txt
+          cat > build/cam/BUILD_INFORMATION.txt <<EOF
+          Firmware version: 1.5.0-camlink-ota
+          Board: AI Thinker ESP32-CAM
+          FQBN: esp32:esp32:esp32:PSRAM=enabled,PartitionScheme=min_spiffs
+          Arduino CLI: ${ARDUINO_CLI_VERSION}
+          ESP32 core: ${ESP32_CORE_VERSION}
+          Edge Impulse library: siboat_inferencing.zip from repository root
+          Commit: ${GITHUB_SHA}
+          Branch: ${GITHUB_REF_NAME}
+          Built: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+          (cd build/cam && zip -9 SIBOAT_ESP32_CAM_FLASH_PACKAGE.zip \
+            SIBOAT_ESP32_CAM_APP.bin \
+            SIBOAT_ESP32_CAM_ALL-IN-ONE.bin \
+            SIBOAT_ESP32_CAM_BOOTLOADER.bin \
+            SIBOAT_ESP32_CAM_PARTITIONS.bin \
+            FLASH_INSTRUCTIONS.txt BUILD_INFORMATION.txt SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SIBOAT_ESP32_CAM_FLASH_PACKAGE
+          path: build/cam/SIBOAT_ESP32_CAM_FLASH_PACKAGE.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SIBOAT_ESP32_CAM_BUILD_FILES
+          path: |
+            build/cam/*.bin
+            build/cam/*.txt
+          if-no-files-found: error
+          compression-level: 0
