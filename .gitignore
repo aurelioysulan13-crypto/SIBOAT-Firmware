@@ -1,0 +1,16 @@
+# Local credentials — never commit
+**/siboat_secrets.h
+
+# Build outputs
+/build/
+/out/
+/dist/
+/output/
+*.elf
+*.map
+
+# Local editor/system files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
